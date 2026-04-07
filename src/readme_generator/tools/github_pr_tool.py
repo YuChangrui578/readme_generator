@@ -7,7 +7,7 @@ from github.Branch import Branch
 from github.PullRequest import PullRequest
 from github.ContentFile import ContentFile
 from crewai import Agent,Task
-from langchain.tool import tool
+from langchain.tools import tool
 from typing import Dict,Optional,Tuple
 import traceback
 
@@ -103,8 +103,8 @@ class GitHubClient:
             if isinstance(existing,list):
                 existing=existing[0]
                 self.repo.update_file(path=path,message=message,content=content_bytes,sha=existing.sha,branch=branch_name)
-            except GithubException as e:
-                raise e
+        except GithubException as e:
+            raise e
 
 class PRPipeline:
     def __init__(self,token:str,repo_name:str,base_branch:str="main"):
@@ -167,9 +167,9 @@ class GithubPRTool():
     @tool("根据PR所需的相关参数,上传对应repo的branch的pr")
     def upload_pr_for_repo(github_token:str,repo:str,base_branch:str,branch_name:str,context:Dict[str,str],pr_title:str,pr_body:str)->Optional[PullRequest]:
         try:
-            pipeline=PRPipeline(github_token,repo_name,base_branch)
-            branch,is_new,existing_pr=self.pipeline.step1_check_resources(branch_name)
-            final_pr=self.pipeline.step2_ensure_pr(branch_name,pr_title,pr_body,existing_pr)
+            pipeline=PRPipeline(github_token,repo,base_branch)
+            branch,is_new,existing_pr=pipeline.step1_check_resources(branch_name)
+            final_pr=pipeline.step2_ensure_pr(branch_name,pr_title,pr_body,existing_pr)
             return final_pr
         except Exception as e:
             traceback.print_exc()
@@ -178,7 +178,7 @@ class GithubPRTool():
     @tool("根据PR所需的相关参数,验证对应repo的branch的pr是否存在")
     def validate_pr_exists_for_repo(github_token:str,repo:str,base_branch:str,branch_name:str,state:str="open"):
         try:
-            pipeline=PRPipeline(github_token,repo_name,base_branch)
+            pipeline=PRPipeline(github_token,repo,base_branch)
             client=pipeline.client
             existing_pr=client.get_open_pr(branch_name)
             if state=="open":
@@ -189,7 +189,7 @@ class GithubPRTool():
                     print(f"[需求 2]不存在开放的PR")
                     return False,None
             else:
-                pulls=self.client.repo.get_pulls(state=state,head=branch_name)
+                pulls=client.repo.get_pulls(state=state,head=branch_name)
                 if pulls.totalCount>0:
                     pr=pulls[0]
                     print(f"[需求 2]存在状态为'{state}'的PR:#{pr.number}")
@@ -204,7 +204,7 @@ class GithubPRTool():
     def create_new_pr_for_repo(github_token:str,repo:str,base_branch:str,branch_name:str,pr_title:str,pr_body:str,force:bool=False)->Optional[PullRequest]:
         print(f"[需求 3]尝试创建新 PR:分支 {branch_name}")
         try:
-            pipeline=PRPipeline(github_token,repo_name,base_branch)
+            pipeline=PRPipeline(github_token,repo,base_branch)
             client=pipeline.client
             new_pr=client.create_pr(
                 branch_name=branch_name,

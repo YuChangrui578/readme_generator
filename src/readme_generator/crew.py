@@ -1,17 +1,14 @@
 from crewai import Agent,Crew,Process,Task
 from crewai.project import CrewBase,agent,crew,task
 
-<<<<<<< HEAD
 from readme_generator.tools.model_search import ModelSearchTool
 from readme_generator.tools.github_pr import GithubPRTool
-=======
 from readme_generator.tools.model_search_tool import ModelSearchTool
 from readme_generator.tools.github_pr_tool import GithubPRTool
 from readme_generator.tools.memory_store_tool import MemoryStoreTool
 from readme_generator.tools.memory_retrieve_tool import MemoryRetrieveTool
 from readme_generator.tools.merge_content_tool import MergeContentTool
 from readme_generator.tools.remote_exec_tool import RemoteExecutionTool
->>>>>>> d671c9d (init)
 from langchain_openai import ChatOpenAI
 
 @CrewBase
@@ -32,14 +29,11 @@ class GithubCrew:
 
     @agent
     def readme_generator_agent(self)->Agent:
-<<<<<<< HEAD
         model_search_tool=ModelSearchTool()
         return Agent(
             config=self.agents_config["readme_generator_agent"],
-=======
-        return Agent(
-            config=self.agents_config["readme_generator_agent"],
             llm=self.llm,
+            tools=[model_search_tool],
             verbose=True,
             allow_delegation=True
         )
@@ -49,18 +43,11 @@ class GithubCrew:
         model_search_tool=ModelSearchTool()
         return Agent(
             config=self.agents_config["model_search_agent"],
->>>>>>> d671c9d (init)
             tools=[model_search_tool],
             llm=self.llm,
             verbose=True,
             allow_delegation=True
         )
-<<<<<<< HEAD
-
-    @agent 
-    def run_code_agent(self)->Agent:
-        pass
-=======
     
     @agent
     def merge_readme_agent(self)->Agent:
@@ -95,7 +82,6 @@ class GithubCrew:
             verbose=True,
             allow_delegation=True
         )
->>>>>>> d671c9d (init)
 
     @task 
     def github_pr(self)->Task:
@@ -106,10 +92,6 @@ class GithubCrew:
         return Task(config=self.tasks_config["readme_generate"])
     
     @task
-<<<<<<< HEAD
-    def run_code(self)->Task:
-        return Task(config=self.tasks_config["run_code"])
-=======
     def model_search(self)->Task:
         return Task(config=self.tasks_config["model_search"])
 
@@ -124,7 +106,6 @@ class GithubCrew:
     @task 
     def memory_store(self)->Task:
         return Task(config=self.tasks_config["memory_store"])
->>>>>>> d671c9d (init)
     
     @crew
     def crew(self)->Crew:

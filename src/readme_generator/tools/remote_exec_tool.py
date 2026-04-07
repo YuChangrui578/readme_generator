@@ -3,7 +3,7 @@ import time
 from typing import List,Dict
 from crewai_tools import BaseTool
 from pydantic import BaseModel,Field
-from langchain_tools import tool
+from langchain.tools import tool
 
 class RemoteExecInput(BaseModel):
     commands:List[str]=Field(...,description="List of shell commands to execute on the remote server.")

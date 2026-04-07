@@ -3,7 +3,7 @@ import os
 import requests
 
 from crewai import Agent,Task
-from langchain.tool import tool
+from langchain.tools import tool
 
 class ModelSearchTool():
     
