@@ -2,7 +2,7 @@ import os
 import time
 from typing import List,Dict,Optional,Any
 from pydantic import BaseModel,Field
-from langchain.tools import tool
+from crewai.tools import tool
 import re
 import paramiko
 import tempfile

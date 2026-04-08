@@ -3,10 +3,10 @@ import os
 import requests
 
 from crewai import Agent,Task
-from langchain.tools import tool
+from crewai.tools import tool
+# from langchain.tools import tool
 
-class ModelSearchTool():
-    
+class ModelSearchTool:
     @tool("Search Model")
     def huggingface_model_search_url(model_name:str):
         """Retrieve the relevant URL from Hugging Face based on the model_name."""

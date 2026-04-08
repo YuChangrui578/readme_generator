@@ -8,7 +8,8 @@ import openai
 class CustomChatOpenAI(BaseChatModel):
     base_url:str
     api_key:Optional[str]=None
-    # temperature:float=0.7
+    temperature:float=0.7
+    model:str="unknown_model"
 
     @property
     def _llm_type(self)->str:

@@ -44,7 +44,6 @@ class ModelWorkflowFlow(Flow[ModelWorkflowState]):
     @start("wait_next_run")
     def run_model_search(self):
         print("\n启动模型搜索智能体")
-        import pdb;pdb.set_trace()
         ModelSearchCrew().crew().kickoff()
         import pdb;pdb.set_trace()
         print("模型信息已存入全局内存")

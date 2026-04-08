@@ -1,5 +1,5 @@
 from pydantic import BaseModel,Field
-from langchain.tools import tool
+from crewai.tools import tool
 from tools.memory_tool import GlobalMemory
 import json
 

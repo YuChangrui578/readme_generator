@@ -7,7 +7,8 @@ from github.Branch import Branch
 from github.PullRequest import PullRequest
 from github.ContentFile import ContentFile
 from crewai import Agent,Task
-from langchain.tools import tool
+# from langchain.tools import tool
+from crewai.tools import tool
 from typing import Dict,Optional,Tuple
 import traceback
 
