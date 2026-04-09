@@ -1,9 +1,8 @@
 from crewai import Agent,Crew,Process,Task
 from crewai.project import CrewBase,agent,crew,task
 from crewai.llm import LLM
-from tools.merge_content_tool import MergeContentTool
-from tools.memory_tool import MemoryTool
-from tools.chatopenai import CustomChatOpenAI
+from readme_generator.tools.merge_content_tool import MergeContentTool
+from readme_generator.tools.memory_tool import MemoryTool
 
 
 @CrewBase

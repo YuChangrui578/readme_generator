@@ -110,13 +110,13 @@ class ModelWorkflowFlow(Flow[ModelWorkflowState]):
         time.sleep(60)
 
 def kickoff():
-    MODEL_LIST=["Llama-3.2-3B-Instruct","Llama-3.2-3B-quantized.w8a8","Llama-3.2-3B-Instruct-FP8"]
+    MODEL_LIST=["Llama-3.2-3B-Instruct","Llama-3.2-3B-quantized.w8a8"]
     REMOTE_FOLDER="/home/changrui"
     SSH_CONFIG={
         "hostname":"10.112.229.29",
         "port":22,
-        "user_name":"root",
-        "password":"intel,123"
+        "user_name":"changrui",
+        "password":"Ycr2wy1314"
     }
     GITHUB_CONFIG={
         "token":"",

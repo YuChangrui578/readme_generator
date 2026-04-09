@@ -1,9 +1,8 @@
 from crewai import Agent,Crew,Process,Task
 from crewai.project import CrewBase,agent,crew,task
 from crewai.llm import LLM
-from tools.model_search_tool import ModelSearchTool
-from tools.memory_tool import MemoryTool
-from tools.chatopenai import CustomChatOpenAI
+from readme_generator.tools.model_search_tool import ModelSearchTool
+from readme_generator.tools.memory_tool import MemoryTool
 from langchain_openai import ChatOpenAI
 
 @CrewBase

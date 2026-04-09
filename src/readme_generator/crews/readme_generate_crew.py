@@ -1,7 +1,7 @@
 from crewai import Agent,Crew,Process,Task
 from crewai.project import CrewBase,agent,crew,task
 from crewai.llm import LLM
-from tools.memory_tool import MemoryTool
+from readme_generator.tools.memory_tool import MemoryTool
 
 
 @CrewBase

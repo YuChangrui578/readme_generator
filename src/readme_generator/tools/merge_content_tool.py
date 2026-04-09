@@ -1,6 +1,6 @@
 from pydantic import BaseModel,Field
 from crewai.tools import tool
-from tools.memory_tool import GlobalMemory
+from .memory_tool import GlobalMemory
 import json
 
 class MergeContentTool():

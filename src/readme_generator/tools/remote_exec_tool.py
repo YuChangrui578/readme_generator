@@ -9,8 +9,6 @@ import tempfile
 import sys
 import json
 import select
-from crews.config.sys_args import remote_args
-
 
 class RemoteGeneralExecutor:
     def __init__(
@@ -93,6 +91,11 @@ class RemoteExecutionTool:
         )
         executor.disconnect()
         return results
+    
+    @tool("Get SGLANG Environment")
+    def get_sglang_environment():
+        """Obtain a Python environment with SGLANG directly through the terminal by inputting the returned instruction string."""
+        return "source /home/changrui/miniconda3/bin/activate && conda activate intel-extension"
 
     # @tool("Extract SSH")
     # def extract_shell_commands(markdown_content:str)->List[Dict[str,str]]:

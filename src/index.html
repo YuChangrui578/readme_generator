@@ -1,0 +1,93 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8"/>
+  <title>Chat</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="bg-[#0F1116] text-white min-h-screen">
+
+<div class="max-w-3xl mx-auto py-10 px-4 pb-28">
+  <div id="messages" class="flex flex-col gap-5"></div>
+</div>
+
+<!-- 底部输入栏 -->
+<div class="fixed bottom-0 left-0 right-0 bg-[#0F1116] border-t border-gray-800 p-4">
+  <div class="max-w-3xl mx-auto relative">
+    <textarea
+      id="input"
+      class="w-full bg-[#1B1F24] border border-gray-700 rounded-lg p-3 h-[60px] text-white"
+      placeholder="输入你的需求">
+    </textarea>
+    <div class="absolute right-3 bottom-3 flex gap-2">
+      <button id="next" disabled class="bg-blue-600 px-3 py-1 rounded text-sm disabled:opacity-50">
+        下一步
+      </button>
+      <button id="send" class="bg-green-600 px-3 py-1 rounded text-sm">
+        发送
+      </button>
+    </div>
+  </div>
+</div>
+
+<script>
+  const messages = document.getElementById('messages');
+  const input = document.getElementById('input');
+  const send = document.getElementById('send');
+  const next = document.getElementById('next');
+  const API = 'http://127.0.0.1:8000/api';
+
+  function msg(role, title, text) {
+    const div = document.createElement('div');
+    div.className = role === 'user'
+      ? 'bg-[#1E293B] p-3 rounded-lg ml-auto max-w-[80%]'
+      : 'bg-[#111827] p-3 rounded-lg max-w-[80%] text-sm whitespace-pre-wrap';
+
+    const head = document.createElement('div');
+    head.className = 'text-xs text-blue-400 mb-1';
+    head.textContent = title;
+
+    const body = document.createElement('div');
+    body.textContent = text;
+
+    div.append(head, body);
+    messages.appendChild(div);
+    window.scrollTo(0, document.body.scrollHeight);
+  }
+
+  // 发送用户输入
+  send.onclick = async () => {
+    const text = input.value.trim();
+    if (!text) return;
+    msg('user', 'User', text);
+    send.disabled = true;
+    input.value = '';
+
+    const res = await fetch(API + '/start', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ user_input: text })
+    });
+    const data = await res.json();
+
+    msg('agent', data.agent, data.final_output);
+    next.disabled = false;
+  };
+
+  // 执行下一个 Agent
+  next.onclick = async () => {
+    next.disabled = true;
+    const res = await fetch(API + '/next');
+    const data = await res.json();
+
+    if (data.finished) {
+      msg('agent', '✅ 完成', data.final_output);
+      send.disabled = false;
+    } else {
+      msg('agent', data.agent, data.final_output);
+      next.disabled = false;
+    }
+  };
+</script>
+</body>
+</html>
