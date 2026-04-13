@@ -12,11 +12,11 @@ class ModelSearchTool:
     def huggingface_model_search_url(model_list:List[str]):
         """Retrieve the relevant URL from HuggingFace based on the model_name."""
         proxy_backup={
-            "http_proxy":"http://proxy-dmz.intel.com:912",
-            "https_proxy":"http://proxy-dmz.intel.com:912"
+            "http_proxy":"http://proxy.ims.intel.com:911",
+            "https_proxy":"https://proxy.ims.intel.com:911"
         }
         proxy_backup=restore_proxy_in_process(proxy_backup=proxy_backup)
-        API_URL="https://hf-mirror.com/api/models"
+        API_URL="https://huggingface.co/api/models"
         model_url_list=[]
         model_id_list=[]
         for model_name in model_list:
@@ -33,7 +33,7 @@ class ModelSearchTool:
                 if models:
                     model_id=models[0]["modelId"]
                     model_id_list.append(model_id)
-                    model_url_list.append(f"https://hf-mirror.com/{model_id}")
+                    model_url_list.append(f"https://huggingface.co/{model_id}")
                 else:
                     model_id_list.append("")
                     model_url_list.append("")

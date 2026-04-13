@@ -8,6 +8,7 @@ from dataclasses import dataclass,asdict
 @dataclass
 class MemoryData:
     model_list:list=None
+    github_url:list=None
     model_readme:list=None
     merged_readme:str=""
     remote_folder:str=""
@@ -16,14 +17,16 @@ class MemoryData:
     model_url_list:list=None
     model_id_list:list=None
     execution_result:list=None
-    reference_example:str=""
+    reference_example_list:list=None
+    fail_reason_list:list=None
     merged_readme_example:str=""
     executed_command:str=""
+    origin_reference_example_list:list=None
 
 class GlobalMemory:
     def __init__(
         self,
-        persist_path:str="global_memory.json"
+        persist_path:str="/home/changrui/readme_generator/src/readme_generator/global_memory.json"
     ):
         self.persist_path=persist_path
         self.memory=MemoryData()
@@ -42,9 +45,12 @@ class GlobalMemory:
                 self.memory.model_url_list=data.get("model_url_list",[])
                 self.memory.model_id_list=data.get("model_id_list",[])
                 self.memory.execution_result=data.get("execution_result",[])
-                self.memory.reference_example=data.get("reference_example","")
+                self.memory.reference_example_list=data.get("reference_example_list",[])
+                self.memory.origin_reference_example_list=data.get("origin_reference_example_list",[])
                 self.memory.merged_reference_example=data.get("merged_reference_example","")
                 self.memory.executed_command=data.get("executed_command","")
+                self.memory.github_url=data.get("github_url",[])
+                self.memory.fail_reason_list=data.get("fail_reason_list",[])
         else:
             self.memory.model_list=[]
             self.memory.model_readme=[]
@@ -54,10 +60,13 @@ class GlobalMemory:
             self.memory.github_config={}
             self.memory.model_url_list=[]
             self.memory.model_id_list=[]
-            self.memory.reference_example=""
+            self.memory.reference_example_list=[]
             self.memory.merged_reference_example=""
             self.memory.execution_result=[]
             self.memory.executed_command=""
+            self.memory.github_url=[]
+            self.memory.origin_reference_example_list=[]
+            self.memory.fail_reason_list=[]
             self.save_to_file()
 
     def save_to_file(self)->bool:
@@ -71,20 +80,24 @@ class GlobalMemory:
                 "github_config":self.memory.github_config,
                 "model_url_list":self.memory.model_url_list,
                 "model_id_list":self.memory.model_id_list,
-                "reference_example":self.memory.reference_example,
+                "reference_example_list":self.memory.reference_example_list,
                 "merged_reference_example":self.memory.merged_reference_example,
                 "execution_result":self.memory.execution_result,
-                "executed_command":self.memory.executed_command
+                "executed_command":self.memory.executed_command,
+                "github_url":self.memory.github_url,
+                "origin_reference_example_list":self.memory.origin_reference_example_list,
+                "fail_reason_list":self.memory.fail_reason_list
             }
             with open(self.persist_path,"w",encoding="utf-8") as f:
                 json.dump(data,f,ensure_ascii=False,indent=2)
             return True
         except Exception as e:
+            print(e)
+            traceback.print_exc()
             return False
 
     def memory_store(self,key:str,value:Any)->bool:
         try:
-            self.load_from_file()
             if key=="model_list":
                 self.memory.model_list=value
             elif key=="merged_readme":
@@ -101,14 +114,20 @@ class GlobalMemory:
                 self.memory.model_url_list=value
             elif key=="model_id_list":
                 self.memory.model_id_list=value
-            elif key=="reference_example":
-                self.memory.reference_example=value
+            elif key=="reference_example_list":
+                self.memory.reference_example_list=value
             elif key=="merged_reference_example":
                 self.memory.merged_reference_example=value
             elif key=="execution_result":
                 self.memory.execution_result=value
             elif key=="executed_command":
                 self.memory.executed_command=value
+            elif key=="github_url":
+                self.memory.github_url=value
+            elif key=="origin_reference_example_list":
+                self.memory.origin_reference_example_list=value
+            elif key=="fail_reason_list":
+                self.memory.fail_reason_list=value
             self.save_to_file()
             return True
         except Exception as e:
@@ -135,14 +154,20 @@ class GlobalMemory:
                 return self.memory.model_url_list
             elif key=="model_id_list":
                 return self.memory.model_id_list
-            elif key=="reference_example":
-                return self.memory.reference_example
+            elif key=="reference_example_list":
+                return self.memory.reference_example_list
             elif key=="merged_reference_example":
                 return self.memory.merged_reference_example
             elif key=="execution_result":
                 return self.memory.execution_result
             elif key=="executed_command":
                 return self.memory.executed_command
+            elif key=="github_url":
+                return self.memory.github_url
+            elif key=="origin_reference_example_list":
+                return self.memory.origin_reference_example_list
+            elif key=="fail_reason_list":
+                return self.memory.fail_reason_list
         except Exception as e:
             print(e)
             traceback.print_exc()
@@ -182,3 +207,4 @@ class MemoryTool:
         """"""
         memory=GlobalMemory()
         return memory.get_memory_value_types()
+    

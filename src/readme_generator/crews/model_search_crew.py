@@ -1,8 +1,18 @@
+import sys
+import os
+
+root_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "../.."))
+
+# 将根路径添加到 sys.path，让 Python 能识别 readme_generator 模块
+if root_path not in sys.path:
+    sys.path.append(root_path)
+
 from crewai import Agent,Crew,Process,Task
 from crewai.project import CrewBase,agent,crew,task
 from crewai.llm import LLM
 from readme_generator.tools.model_search_tool import ModelSearchTool
 from readme_generator.tools.memory_tool import MemoryTool
+from readme_generator.tools.get_step import create_step_callback
 from langchain_openai import ChatOpenAI
 
 @CrewBase
@@ -24,6 +34,7 @@ class ModelSearchCrew:
     @agent
     def model_search_agent(self)->Agent:
         model_search_tool=ModelSearchTool.huggingface_model_search_url
+        #model_search_mirror_tool=ModelSearchTool.huggingface_mirror_model_search_url
         memory_store_tool=MemoryTool.store_memory
         memory_retrieve_tool=MemoryTool.retrieve_memory
         memory_get_key_tool=MemoryTool.get_memory_key
@@ -33,6 +44,7 @@ class ModelSearchCrew:
             llm=self.llm,
             verbose=True,
             allow_delegation=True,
+            step_callback=create_step_callback(agent_name="model_search_agent")
         )
     
     @task
@@ -45,5 +57,6 @@ class ModelSearchCrew:
             agents=self.agents,
             tasks=self.tasks,
             process=Process.sequential,
-            verbose=True
+            verbose=True,
+            stream=True
         )

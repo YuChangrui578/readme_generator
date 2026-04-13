@@ -1,8 +1,17 @@
+import sys
+import os
+
+root_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "../.."))
+
+# 将根路径添加到 sys.path，让 Python 能识别 readme_generator 模块
+if root_path not in sys.path:
+    sys.path.append(root_path)
 from crewai import Agent,Crew,Process,Task
 from crewai.project import CrewBase,agent,crew,task
 from crewai.llm import LLM
 from readme_generator.tools.github_pr_tool import GithubPRTool
 from readme_generator.tools.memory_tool import MemoryTool
+from readme_generator.tools.get_step import create_step_callback
 
 
 @CrewBase
@@ -29,6 +38,7 @@ class GithubPRCrew:
             llm=self.llm,
             verbose=True,
             allow_delegation=True,
+            #step_callback=create_step_callback(agent_name="github_agent")
         )
     
     @task 
@@ -41,5 +51,6 @@ class GithubPRCrew:
             agents=self.agents,
             tasks=self.tasks,
             process=Process.sequential,
-            verbose=True
+            verbose=True,
+            stream=True
         )

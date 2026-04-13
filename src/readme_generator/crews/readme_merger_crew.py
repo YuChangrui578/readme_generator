@@ -1,8 +1,18 @@
+import sys
+import os
+
+root_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "../.."))
+
+# 将根路径添加到 sys.path，让 Python 能识别 readme_generator 模块
+if root_path not in sys.path:
+    sys.path.append(root_path)
+    
 from crewai import Agent,Crew,Process,Task
 from crewai.project import CrewBase,agent,crew,task
 from crewai.llm import LLM
-from readme_generator.tools.merge_content_tool import MergeContentTool
+from readme_generator.tools.merge_readme_tool import MergeReadmeTool
 from readme_generator.tools.memory_tool import MemoryTool
+from readme_generator.tools.get_step import create_step_callback
 
 
 @CrewBase
@@ -16,16 +26,16 @@ class ReadmeMergerCrew:
     )
     @agent
     def merge_readme_agent(self)->Agent:
-        merge_readme_tool=MergeContentTool.merge_readme
         memory_store_tool=MemoryTool.store_memory
         memory_retrieve_tool=MemoryTool.retrieve_memory
         memory_get_key_tool=MemoryTool.get_memory_key
         return Agent(
             config=self.agents_config["merge_readme_agent"],
-            tools=[merge_readme_tool,memory_store_tool,memory_get_key_tool,memory_retrieve_tool],
+            tools=[memory_store_tool,memory_get_key_tool,memory_retrieve_tool],
             llm=self.llm,
             verbose=True,
-            allow_delegation=True
+            allow_delegation=True, 
+            #step_callback=create_step_callback(agent_name="merge_readme_agent")
         )
     
     @task
@@ -38,5 +48,6 @@ class ReadmeMergerCrew:
             agents=self.agents,
             tasks=self.tasks,
             process=Process.sequential,
-            verbose=True
+            verbose=True,
+            stream=True
         )
