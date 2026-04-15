@@ -45,7 +45,8 @@ sglang serve                     \
     --device cpu                 \
     --enable-torch-compile       \
     --host 0.0.0.0               \
-    --tp 6
+    --tp 6                       \
+    --quantization <quantization>
 ```
 
 The `<MODEL_ID_OR_PATH>` can be either the model ID (a.k.a. `meta-llama/Llama-3.1-8B-Instruct`)

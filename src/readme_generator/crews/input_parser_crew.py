@@ -11,7 +11,7 @@ from crewai import Agent,Crew,Process,Task
 from crewai.project import CrewBase,agent,crew,task
 from crewai.llm import LLM
 from readme_generator.tools.memory_tool import MemoryTool
-from readme_generator.tools.get_step import create_step_callback
+from readme_generator.tools.input_parser_tool import InputParseTool
 
 @CrewBase
 class InputParserCrew:
@@ -26,17 +26,23 @@ class InputParserCrew:
 
     @agent
     def input_parser_agent(self)->Agent:
-        memory_store_tool=MemoryTool.store_memory
-        memory_retrieve_tool=MemoryTool.retrieve_memory
-        memory_get_key_tool=MemoryTool.get_memory_key
+        memory_store_tool=InputParseTool.store_memory
+        # memory_get_key_tool=InputParseTool.memory_get_keys
+        # memory_get_value_type_tool=InputParseTool.memory_get_type
+        ipnut_parse_text_tool=InputParseTool.parse_input_text
+        get_input_text_tool=InputParseTool.get_input_text
+        # set_github_config_tool=InputParseTool.set_github_config_to_memory
+        # set_ssh_config_tool=InputParseTool.set_ssh_config_to_memory
+        # set_remote_folder_tool=InputParseTool.set_remote_folder_to_memory
+        # set_origin_reference_example_list_tool=InputParseTool.set_origin_reference_example_list_to_memory
+        # set_merged_reference_example_tool=InputParseTool.set_merged_reference_example_to_memory
 
         return Agent(
             config=self.agents_config["input_parser_agent"],
-            tools=[memory_get_key_tool,memory_store_tool],
+            tools=[ipnut_parse_text_tool,memory_store_tool,get_input_text_tool],
             llm=self.llm,
             verbose=True,
             allow_delegation=True,
-            step_callback=create_step_callback(agent_name="input_parser_agent")
         )
     
     @task

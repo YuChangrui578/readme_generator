@@ -27,17 +27,16 @@ class ReadmeGeneratorCrew:
 
     @agent
     def readme_generator_agent(self)->Agent:
-        memory_store_tool=MemoryTool.store_memory
-        memory_retrieve_tool=MemoryTool.retrieve_memory
-        memory_get_key_tool=MemoryTool.get_memory_key
-        get_reference_example=GenerateReadmeTool.get_reference_example
+        memory_store_tool=GenerateReadmeTool.memory_store_model_readme
+        memory_retrieve_tool=GenerateReadmeTool.memory_retrieve_model_all_info
+        batch_generate_model_readme_tool=GenerateReadmeTool.batch_generate_model_readme
+        get_reference_example=GenerateReadmeTool.get_reference_example_list
         return Agent(
             config=self.agents_config["readme_generator_agent"],
             llm=self.llm,
-            tools=[memory_store_tool,memory_retrieve_tool,memory_get_key_tool,get_reference_example],
+            tools=[memory_store_tool,memory_retrieve_tool,batch_generate_model_readme_tool,get_reference_example],
             verbose=True,
             allow_delegation=True,
-            step_callback=create_step_callback(agent_name="readme_generator_agent")
         )
     
     @task

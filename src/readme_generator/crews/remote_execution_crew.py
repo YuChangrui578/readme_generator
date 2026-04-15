@@ -29,16 +29,18 @@ class RemoteExecutionCrew:
         remote_execution_tool=RemoteExecutionTool.execute_on_remote_server
         remote_sglang_tool=RemoteExecutionTool.get_sglang_environment
         remote_build_tool=RemoteExecutionTool.build_command
-        memory_store_tool=MemoryTool.store_memory
-        memory_retrieve_tool=MemoryTool.retrieve_memory
-        memory_get_key_tool=MemoryTool.get_memory_key
+        remote_check_remote_model_exists_tool=RemoteExecutionTool.check_remote_model_exists
+        remote_download_model_from_huggingface_tool=RemoteExecutionTool.download_model_from_huggingface
+        remote_fix_command_quantization_tool=RemoteExecutionTool.fix_command_quantization
+        remote_memory_store_execution_result_tool=RemoteExecutionTool.memory_retrieve_execution_context
+        remote_retry_allowed_tool=RemoteExecutionTool.retry_allowed
+        remote_fix_command_errors_tool=RemoteExecutionTool.fix_command_errors
         return Agent(
             config=self.agents_config["remote_execution_agent"],
-            tools=[remote_build_tool,remote_sglang_tool,remote_execution_tool,memory_store_tool,memory_retrieve_tool,memory_get_key_tool],
+            tools=[remote_build_tool,remote_sglang_tool,remote_execution_tool,remote_check_remote_model_exists_tool,remote_download_model_from_huggingface_tool,remote_fix_command_quantization_tool,remote_memory_store_execution_result_tool,remote_retry_allowed_tool,remote_fix_command_errors_tool],
             llm=self.llm,
             verbose=True,
             allow_delegation=True,
-            step_callback=create_step_callback(agent_name="remote_execution_agent")
         )
     
     @task

@@ -7,6 +7,7 @@ from dataclasses import dataclass,asdict
 
 @dataclass
 class MemoryData:
+    input_text:str=""
     model_list:list=None
     github_url:list=None
     model_readme:list=None
@@ -51,6 +52,7 @@ class GlobalMemory:
                 self.memory.executed_command=data.get("executed_command","")
                 self.memory.github_url=data.get("github_url",[])
                 self.memory.fail_reason_list=data.get("fail_reason_list",[])
+                self.memory.input_text=data.get("input_text","")
         else:
             self.memory.model_list=[]
             self.memory.model_readme=[]
@@ -67,6 +69,7 @@ class GlobalMemory:
             self.memory.github_url=[]
             self.memory.origin_reference_example_list=[]
             self.memory.fail_reason_list=[]
+            self.memory.input_text=""
             self.save_to_file()
 
     def save_to_file(self)->bool:
@@ -86,7 +89,8 @@ class GlobalMemory:
                 "executed_command":self.memory.executed_command,
                 "github_url":self.memory.github_url,
                 "origin_reference_example_list":self.memory.origin_reference_example_list,
-                "fail_reason_list":self.memory.fail_reason_list
+                "fail_reason_list":self.memory.fail_reason_list,
+                "input_text":self.memory.input_text
             }
             with open(self.persist_path,"w",encoding="utf-8") as f:
                 json.dump(data,f,ensure_ascii=False,indent=2)
@@ -128,6 +132,8 @@ class GlobalMemory:
                 self.memory.origin_reference_example_list=value
             elif key=="fail_reason_list":
                 self.memory.fail_reason_list=value
+            elif key=="input_text":
+                self.memory.input_text=value
             self.save_to_file()
             return True
         except Exception as e:
@@ -168,6 +174,8 @@ class GlobalMemory:
                 return self.memory.origin_reference_example_list
             elif key=="fail_reason_list":
                 return self.memory.fail_reason_list
+            elif key=="input_text":
+                return self.memory.input_text
         except Exception as e:
             print(e)
             traceback.print_exc()

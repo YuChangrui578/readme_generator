@@ -53,7 +53,8 @@ sglang serve                     \
     --device cpu                 \
     --enable-torch-compile       \
     --host 0.0.0.0               \
-    --tp 6
+    --tp 6                       \
+    --quantization <quantization>
 ```
 
 The `<MODEL_ID_OR_PATH>` can be either the model ID (a.k.a. `meta-llama/Llama-3.1-8B-Instruct`)
@@ -116,7 +117,8 @@ sglang serve                     \
     --quantization w8a8_int8     \
     --enable-torch-compile       \
     --host 0.0.0.0               \
-    --tp 6
+    --tp 6                       \
+    --quantization <quantization>
 ```
 
 The `<MODEL_ID_OR_PATH>` can be either the model ID (a.k.a. `RedHatAI/Meta-Llama-3.1-8B-Instruct-quantized.w8a8`)
@@ -178,7 +180,8 @@ sglang serve                     \
     --device cpu                 \
     --enable-torch-compile       \
     --host 0.0.0.0               \
-    --tp 6
+    --tp 6                       \
+    --quantization <quantization>
 ```
 
 The `<MODEL_ID_OR_PATH>` can be either the model ID (a.k.a. `RedHatAI/Meta-Llama-3.1-8B-Instruct-FP8`)
@@ -254,7 +257,8 @@ python -m sglang.launch_server   \
     --device cpu                 \
     --enable-torch-compile       \
     --host 0.0.0.0               \
-    --tp 6
+    --tp 6                       \
+    --quantization <quantization>
 ```
 
 The `<MODEL_ID_OR_PATH>` can be either the model ID (a.k.a. `hugging-quants/Meta-Llama-3.1-8B-Instruct-AWQ-INT4`)

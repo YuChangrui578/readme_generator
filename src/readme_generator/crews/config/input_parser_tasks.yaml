@@ -1,6 +1,17 @@
 input_parse_task:
   description: >
-    Receive the input_text provided by the user, conduct a comprehensive and accurate content analysis on it, and extract key information that meets the format requirements of global memory; sort out the extracted valid information in an orderly manner according to the established format of global memory and complete the storage. At the same time, for the keys of global memory that do not have corresponding values in the input_text, fill in the default values strictly according to the preset dtype of the key, avoid information loss or format confusion in the global memory, and ensure that it always remains in a complete, standardized and usable state to provide reliable support for subsequent related operations.
+    Complete input parsing and memory storage in strict sequence:
+    Call get_input_text to obtain input_text from GLOBAL_MEMORY.
+    Execute parse_input_text to process input_text and output two structured results: model_list and github_url (both as lists).
+    Invoke store_memory to save the parsed model_list and github_url into GLOBAL_MEMORY.
+    Verify data standardization: ensure both fields are valid lists with proper default values if empty.
+    The final GLOBAL_MEMORY shall contain:
+    model_list (parsed list of model information)
+    github_url (parsed list of GitHub URL information)
   expected_output: >
-    1. Complete the comprehensive analysis of input_text and successfully extract all key information matching the format of global memory; 2. The parsed information has been sorted out and stored according to the established format of global memory, with accurate and no missing information correspondence; 3. For the keys of global memory that do not have corresponding values provided in the input_text, the default values have been automatically filled in according to their preset dtype; 4. The finally generated global memory is complete, standardized and usable, which can be directly used for subsequent related operations without information loss or format confusion.
+    Global memory updated with parsed structured data:
+    input_text successfully fetched from GLOBAL_MEMORY
+    model_list generated and stored
+    github_url generated and stored
+    All parsed data is standardized and ready for downstream agent tasks.
   agent: input_parser_agent

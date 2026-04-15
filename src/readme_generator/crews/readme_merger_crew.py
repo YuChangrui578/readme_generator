@@ -10,10 +10,9 @@ if root_path not in sys.path:
 from crewai import Agent,Crew,Process,Task
 from crewai.project import CrewBase,agent,crew,task
 from crewai.llm import LLM
-from readme_generator.tools.merge_readme_tool import MergeReadmeTool
 from readme_generator.tools.memory_tool import MemoryTool
 from readme_generator.tools.get_step import create_step_callback
-
+from readme_generator.tools.merge_readme_tool import MergeReadmeTool
 
 @CrewBase
 class ReadmeMergerCrew:
@@ -26,16 +25,16 @@ class ReadmeMergerCrew:
     )
     @agent
     def merge_readme_agent(self)->Agent:
-        memory_store_tool=MemoryTool.store_memory
-        memory_retrieve_tool=MemoryTool.retrieve_memory
+        memory_store_tool=MergeReadmeTool.memory_store_merged_readme
+        memory_retrieve_tool=MergeReadmeTool.memory_retrieve_merge_context
         memory_get_key_tool=MemoryTool.get_memory_key
+        merge_model_series_readme_tool=MergeReadmeTool.merge_model_series_readme
         return Agent(
             config=self.agents_config["merge_readme_agent"],
-            tools=[memory_store_tool,memory_get_key_tool,memory_retrieve_tool],
+            tools=[merge_model_series_readme_tool,memory_store_tool,memory_get_key_tool,memory_retrieve_tool],
             llm=self.llm,
             verbose=True,
             allow_delegation=True, 
-            #step_callback=create_step_callback(agent_name="merge_readme_agent")
         )
     
     @task

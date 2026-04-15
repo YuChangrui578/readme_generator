@@ -1,6 +1,6 @@
 model_search_task:
   description: >
-    According to the input {model_list}(can get the model list from global_memory), use the model search tool to locate the official Hugging Face URL of the corresponding AI model.Automatically store the obtained model_id_list and model_url_list into GLOBAL_MEMORY through the memory_store tool for use by subsequent agents.
+    Use the memory_retrieve tool to get model_list from GLOBAL_MEMORY. Use the huggingface_model_batch_search tool to perform accurate batch retrieval for all models in model_list, obtain the official Hugging Face model_id and URL for each model, and form model_id_list and model_url_list. Finally, use the memory_store tool to store the two lists into GLOBAL_MEMORY to ensure the data is available for subsequent tasks.
   expected_output: >
-    The valid Hugging Face URL list of the target model_list, and the information has been persisted to GLOBAL_MEMORY.
+    Complete and valid model_id_list and model_url_list, all data has been retrieved officially from Hugging Face, correctly matched with model_list, and persisted in GLOBAL_MEMORY for use by readme_generator_agent and other downstream agents.
   agent: model_search_agent

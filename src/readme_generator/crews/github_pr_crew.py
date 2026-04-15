@@ -11,7 +11,6 @@ from crewai.project import CrewBase,agent,crew,task
 from crewai.llm import LLM
 from readme_generator.tools.github_pr_tool import GithubPRTool
 from readme_generator.tools.memory_tool import MemoryTool
-from readme_generator.tools.get_step import create_step_callback
 
 
 @CrewBase
@@ -26,19 +25,17 @@ class GithubPRCrew:
 
     @agent 
     def github_agent(self)->Agent:
-        github_create_pr_tool=GithubPRTool.create_new_pr_for_repo
         github_validate_pr_tool=GithubPRTool.validate_pr_exists_for_repo
         github_upload_pr_tool=GithubPRTool.upload_pr_for_repo
-        memory_store_tool=MemoryTool.store_memory
-        memory_retrieve_tool=MemoryTool.retrieve_memory
-        memory_get_key_tool=MemoryTool.get_memory_key
+        github_config_tool=GithubPRTool.get_github_config
+        github_merged_readme_tool=GithubPRTool.get_merged_readme
+        github_info_store_tool=GithubPRTool.memory_store_pr_info
         return Agent(
             config=self.agents_config["github_agent"],
-            tools=[github_create_pr_tool,github_validate_pr_tool,github_upload_pr_tool,memory_store_tool,memory_retrieve_tool,memory_get_key_tool],
+            tools=[github_validate_pr_tool,github_upload_pr_tool,github_config_tool,github_merged_readme_tool,github_info_store_tool],
             llm=self.llm,
             verbose=True,
             allow_delegation=True,
-            #step_callback=create_step_callback(agent_name="github_agent")
         )
     
     @task 

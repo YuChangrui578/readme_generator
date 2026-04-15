@@ -39,13 +39,14 @@ An example command to launch SGLang server with `meta-llama/Llama-3.1-8B-Instruc
 
 ```bash
 sglang serve                     \
-    --model <MODEL_ID_OR_PATH>   \
+    --model-path <MODEL_ID_OR_PATH>   \
     --trust-remote-code          \
     --disable-overlap-schedule   \
     --device cpu                 \
     --enable-torch-compile       \
     --host 0.0.0.0               \
-    --tp 6
+    --tp 6                       \
+    --quantization <quantization>
 ```
 
 The `<MODEL_ID_OR_PATH>` can be either the model ID (a.k.a. `meta-llama/Llama-3.1-8B-Instruct`)

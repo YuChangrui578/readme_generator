@@ -1,38 +1,30 @@
-from typing import Any,List,Optional
-from langchain.chat_models.base import BaseChatModel
-from langchain_core.messages import BaseMessage
-from langchain_core.outputs import ChatResult, ChatGeneration
-from pydantic import Field
 import openai
+import copy
+from openai import OpenAI,AsyncOpenAI
+import traceback
 
-class CustomChatOpenAI(BaseChatModel):
-    base_url:str
-    api_key:Optional[str]=None
-    temperature:float=0.7
-    model:str="unknown_model"
-
-    @property
-    def _llm_type(self)->str:
-        return "custom_openai"
-    
-    def _generate(
-        self,
-        messages:List[BaseMessage],
-        stop:Optional[List[str]]=None,
-        **kwargs:Any
-    )->ChatResult:
-        client=openai.OpenAI(
+class LLM_Callable:
+    def __init__(self,base_url,api_key,model_name):
+        self.base_url=base_url
+        self.api_key=api_key
+        self.model_name=model_name
+        self.client=openai.Client(
             base_url=self.base_url,
-            api_key=self.api_key or "dummy"
+            api_key=self.api_key
         )
+        
+    def invoke(self,inputs):
+        try:
+            response=self.client.chat.completions.create(
+                model=self.model_name,
+                messages=[
+                    {"role":"user","content":inputs}
+                ]
+            )
+            return response.choices[0].message.content
+        except Exception as e:
+            print(e)
+            traceback.print_exc()
+            return ""
 
-        msg_dicts=[{"role":msg.type,"content":msg.content} for msg in messages]
-        response=client.chat.completions.create(
-            messages=msg_dicts,
-            stop=stop,
-            **kwargs
-        )
-        content=response.choices[0].message.content
-        return ChatResult(
-            generations=[ChatGeneration(messages=BaseMessage(content=content,type="assistant"))]
-        )
+

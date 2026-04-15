@@ -1,6 +1,17 @@
 github_pr_task:
   description: >
-    Receive GitHub PR submission parameters, including {github_token}, {repo_owner}, {repo_name}, {base_branch}, {head_branch}, {pr_title}, {pr_description}, {commit_message}.Use the memory_retrieve tool to get the merged model series README document from GLOBAL_MEMORY.The github_manager agent will automatically authenticate with {github_token}, check if the target PR already exists in the repository: create a new PR if not exists, or update the existing PR with the latest merged README.Push the merged README to the specified branch and complete the PR creation or update process safely.Use the memory_store tool to save PR information (PR number, URL, status) into GLOBAL_MEMORY.
+    Perform the full GitHub PR workflow using parameters including {github_token}, {repo_owner}, {repo_name}, {base_branch}, {head_branch}, {pr_title}, {pr_description}, {commit_message}, and custom upload {path}.
+    1. Use the memory_retrieve tool to get the finalized merged_readme from GLOBAL_MEMORY.
+    2. Authenticate to GitHub and check if the target branch and PR exist.
+    3. Push the merged README content to the custom path in the target branch.
+    4. Automatically resolve the "No commits between branches" error by creating an empty commit if needed.
+    5. Create a new PR if none exists, or update the existing PR with the latest title and description.
+    6. Use the memory_store tool to save PR information (PR number, URL, status) into GLOBAL_MEMORY.
   expected_output: >
-    A complete PR execution report, including PR status (created/updated), PR number, PR URL, commit status, and verification that the merged README has been correctly submitted.All PR records are stored in GLOBAL_MEMORY for traceability.
+    A complete PR execution report including:
+    - PR status (created / updated)
+    - PR number and URL
+    - Commit and file upload status
+    - Confirmation that the merged README was pushed to the custom path
+    All PR metadata is persisted in GLOBAL_MEMORY for traceability.
   agent: github_agent

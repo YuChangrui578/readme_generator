@@ -1,83 +1,74 @@
 remote_execution_task:
   description: >
-    This agent orchestrates the end-to-end validation process for **ALL** models listed in `GLOBAL_MEMORY.model_id`. It must iterate through each model sequentially, ensuring no model is skipped. For each model, it uses the `build_command` tool to extract instructions from `model_readme`, adapts commands based on context (especially quantization suffixes and model availability), executes them via remote Docker sandboxes, and updates `GLOBAL_MEMORY` with results.
+    Fully automated end-to-end remote validation for ALL models. Note: The proxy links http://proxy-dmz.intel.com:911 and http://proxy-dmz.intel.com:912 currently show "link dead" errors; ensure the proxy is available before execution, or replace with valid enterprise proxies.
 
-    **Core Workflow:**
+    Logging Strategy (STRICTLY ENFORCED: NO LOG FILES, NO OUTPUT REDIRECTION):
+    - No log files of any kind, no file writing for outputs, no redirection to /tmp/* or any path.
+    - All command outputs are displayed in real-time in the terminal/SSH session.
+    - All execution results, errors, and statuses are read directly from the terminal/SSH session output without writing to disk.
+    - NEVER use syntax like > /tmp/sglang_dryrun.log 2>&1 or any output redirection to files.
 
-    **1. Sequential Iteration (Strict)**
-    - Retrieve the full list of `model_id`s and `model_url_list` from `GLOBAL_MEMORY`.
-    - **Loop through every model** in `model_id` by index `i`. Do NOT stop after the first model.
-    - For each model, perform steps 2-7 below.
+    Quantization Rule:
+    - For w8a8 type quantization, directly set it to w8a8_int8 by default, no additional configuration or detection required.
 
-    **2. Data Retrieval & Context Awareness**
-    For the current model index `i`:
-    - Fetch `model_readme[i]`, `github_url[i]`, and `model_url_list[i]`.
-    - Fetch historical records (`executed_command`, `execution_result`, `fail_reason_list`) to avoid repeating known errors.
+    Workflow:
+    1. Retrieve model_list and github_url from GLOBAL_MEMORY.
+    2. Iterate each model by index i, process all models without omission.
+    3. Environment Construction:
+    - If github_url[i] exists:
+         a. Use the build_command tool with option="build_sglang_env" to extract clone and docker build commands from model_readme[i].
+         b. Prefix ALL commands with mandatory proxy environment variables:
+            export http_proxy=http://proxy-dmz.intel.com:911 && export https_proxy=http://proxy-dmz.intel.com:912
+         c. Execute commands via execute_on_remote_server, with all outputs printed directly to the terminal.
+         d. Read the execution status directly from the terminal output, retry up to 2 times if failed.
+       - Else if github_url[i] is empty:
+         a. Use the get_sglang_environment tool to obtain the official SGLANG CPU environment (pre-deployed, no extra construction needed).
+       - If environment construction fails: record the failure reason from the terminal output, skip the current model, and proceed to the next one.
+    4. Model check & download:
+       - Use the check_remote_model_exists tool to check the existence of the model, read the result directly from the terminal.
+       - If the model does NOT exist → auto-download via download_model_from_huggingface, with mandatory proxy variables automatically injected; all download logs are displayed in the terminal in real-time.
+    5. Command process:
+       - Use the build_command tool with option="test_model_building" to extract test commands, including sglang server startup commands and bench_serving test commands.
+       - Detect quantization type from model_id.
+       - If w8a8 quantization type is detected, directly set it to w8a8_int by default, then fix the command with the fix_command_quantization tool.
+       - Use the fix_command_errors tool to let LLM intelligently analyze the terminal output and automatically fix commands, environment variables, paths, permissions, and quantization parameters.
+    6. Sglang Server Dry Run & Validation (regular terminal, NO log files, NO output redirection):
+       - Run the sglang server command directly in the regular terminal (without tmux, NO log files, output only to terminal) with proxy variables, run in the background with timeout/health check:
+         export http_proxy=http://proxy-dmz.intel.com:911 && export https_proxy=http://proxy-dmz.intel.com:912 && [sglang server startup command] 
+         sleep [reasonable delay] && curl -I http://localhost:30000 --connect-timeout 5
+       - All outputs are printed to the terminal in real-time; read the success/failure status directly from the terminal output.
+       - If dry run succeeds (no errors, server responds normally): kill the temporary background server process and proceed to tmux formal startup.
+       - If dry run fails: capture the full terminal output directly from the SSH session, use the fix_command_errors tool to analyze and fix, retry up to 2 times; if still failed, record the failure reason and skip the current model.
+    7. Sglang Server Formal Startup & Bench Serving Execution (with Tmux, NO log files, NO output redirection):
+       - Create a new tmux session to avoid server termination when the SSH connection is closed (NO log files, output only in the session, NO file redirection):
+         tmux new-session -d -s sglang_server_session "export http_proxy=http://proxy-dmz.intel.com:911 && export https_proxy=http://proxy-dmz.intel.com:912 && [sglang server startup command]"
+       - Wait for the sglang server to start successfully (check status via terminal output).
+       - Execute the bench_serving test command with proxy variables (NO log files, output only directly displayed in the terminal, no redirection):
+         export http_proxy=http://proxy-dmz.intel.com:911 && export https_proxy=http://proxy-dmz.intel.com:912 && python -m sglang.bench_serving --dataset-path /home/sdp/changrui/ShareGPT_V3_unfiltered_cleaned_split.json --dataset-name random --random-input-len 1024 --random-output-len 1024 --num-prompts 1 --max-concurrency 1 --request-rate inf --random-range-ratio 1.0 --base-url http://localhost:30000
+       - Read the bench_serving test result directly from the tmux/terminal output.
+       - After the bench_serving test is completed, close the tmux session to free up resources:
+         tmux kill-session -t sglang_server_session
+    8. Final execution step (for non-serving test commands, NO log files, NO output redirection):
+       - Inject mandatory proxy environment variables before execution:
+         export http_proxy=http://proxy-dmz.intel.com:911 && export https_proxy=http://proxy-dmz.intel.com:912
+       - First execution: output is printed directly to the terminal (no log writing, no redirection).
+       - Retries: capture output directly from the SSH terminal session, no log files used.
+       - Execute via execute_on_remote_server, retry up to 2 times if failed.
+    9. Save all results (status, terminal outputs, retry times, environment source, dry run validation records, tmux operation records) to GLOBAL_MEMORY.
 
-    **3. Environment Construction Phase**
-    Determine the environment strategy based on `github_url[i]`:
-    - **Official CPU sglang**: If the URL is empty, call "Get SGLANG Environment" for standard activation.
-    - **Custom/Third-party Models**: If the URL is non-empty:
-      1. Navigate to `{remote_folder}/dev`.
-      2. Clone the repository.
-      3. **Call `build_command` tool**: Pass `model_readme[i]` and `option="build_sglang_env"` to extract build commands.
-      4. **Execute Build with Debugging**:
-         - Attempt to build the environment.
-         - **Retry Logic**: If the build fails, analyze the error, fix the command (e.g., proxy issues, dependency conflicts), and retry.
-         - **Max Retries**: Allow a maximum of **2 retries**. If it fails after the 2nd retry, mark the environment build as **FAILED**, record the reason in `fail_reason_list[i]`, and **skip to the next model**. Do not proceed to testing if the environment cannot be built.
-
-    **4. Test Command Extraction, Correction, and Adaptation (Core Logic)**
-    - **Extraction**: **Call `build_command` tool**: Pass `model_readme[i]` and `option="test_model_building"` to retrieve raw download, launch, and test commands.
-    - **Model Availability Check**:
-      - Check if the specific model defined by `model_id[i]` exists in `{remote_folder}/models`.
-      - **Crucial**: Do NOT rely on whatever files happen to be in `{remote_folder}/models`. Only process the model specified in `model_id[i]`.
-      - **If Missing**: Use `model_url_list[i]` to download the model from Hugging Face into `{remote_folder}/models`. Ensure the download completes before proceeding.
-      - **If Present**: Verify the model name matches `model_id[i]`. If it matches, skip downloading. Ignore any other models in the folder that are not in `model_id`.
-    - **Correction & Adaptation (Fix & Adapt)**:
-      1. **Quantization Fix (Critical)**:
-         - Determine if the model is quantized by checking the **suffix** of `model_id[i]` (e.g., `-fp8`, `-int8`, `-awq`, `-w8a8_int8`) or explicit instructions in `model_readme[i]`.
-         - **Rule**: The `--quantization` parameter must correspond to the **actual model being processed** (identified by `model_id[i]`).
-         - If the `model_id` suffix indicates quantization, inject the correct `--quantization <precision>` argument into the launch command.
-         - If the `model_id` has NO quantization suffix, ensure NO `--quantization` flag is added, even if other quantized models exist in the folder.
-      2. **Bug Fixing**:
-         - Compare with historical failures. Fix syntax/logic errors.
-      3. **README Content Write-back**:
-         - If substantial fixes are made, update `model_readme[i]` in `GLOBAL_MEMORY` with the corrected commands.
-
-    **5. Command Grouping & Sandbox Execution**
-    Group corrected commands into: [Download (if needed)], [Launch], [Benchmark].
-    Construct a Shell script:
-    - Navigate to `{remote_folder}/dev`.
-    - Activate environment/start sandbox.
-    - Execute commands sequentially.
-    - Clean up resources.
-
-    **6. Remote Execution & Closed-Loop Feedback**
-    - Execute the script.
-    - **Failure Handling**:
-      - If "command error": Fix command, update `model_readme`, and retry (max 2 retries total for test phase).
-      - If "unfixable error": Record root cause in `fail_reason_list[i]` and move to the next model.
-
-    **7. Result Aggregation & Storage (Strict Constraints)**
-    Update `GLOBAL_MEMORY` lists at index `i`:
-    - **`executed_command[i]`**: Store the final reproducible command chain (joined by `&&`).
-    - **`execution_result[i]`**: Store concise execution summary.
-    - **`fail_reason_list[i]`**: Store detailed error reason if failed; otherwise empty/null.
-    - **`model_readme[i]`**: Store the updated README text if fixes were applied.
-
-    **Important**: The agent must continue this loop until ALL models in `model_id` are processed, regardless of individual failures.
+    All models must be processed without omission.
 
   expected_output: >
-    A status report summarizing the processing of the **current model** in the iteration.
-    
-    Note: The agent is responsible for iterating through the entire `model_id` list. This output reflects the result of the specific model currently being handled.
-    
-    Key points to include:
-    1. Whether the model was downloaded (if missing) or used from cache.
-    2. Whether quantization parameters were correctly added based on the `model_id` suffix.
-    3. Whether the build/test required retries (and if it failed after 2 attempts).
-    4. Final status (Success/Failed) and any error details.
-    
-    All persistent data is stored in GLOBAL_MEMORY lists corresponding to the current model's index.
-
+    Model execution report (all data from terminal output, NO log files):
+    - Model downloaded or used cache
+    - Quantization correctly adapted (w8a8 quantization set to w8a8_int by default)
+    - Environment used (from model readme / official SGLANG CPU environment)
+    - Retry times
+    - Proxy enabled (Yes); Proxy status (note: http://proxy-dmz.intel.com:911 and http://proxy-dmz.intel.com:912 show "link dead" in current test)
+    - Logging strategy applied (NO log files; NO output redirection to files; all output in terminal/SSH only)
+    - Dry run validation status (Success/Failed; result read directly from terminal output if failed)
+    - Tmux operation records (session created, server started, session closed)
+    - Bench_serving test status (Success/Failed; output captured directly from terminal)
+    - Final status (Success/Failed)
+    All data stored in GLOBAL_MEMORY (NO local/remote log files created, no > /tmp/* redirect used).
   agent: remote_execution_agent

@@ -185,14 +185,15 @@ def kickoff():
         "password":"$harktank2Go"
     }
     GITHUB_CONFIG={
-        "github_token":"",
+        "github_token":"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",
         "repo_owner":"YuChangrui578",
         "repo_name":"readme_example",
         "base_branch":"main",
         "head_branch":"dev",
         "pr_title":"test",
         "pr_description":"test_github_pr",
-        "commit_message":"test"
+        "commit_message":"test",
+        "path":"Xeon/Llama/Llama-3.2-3B-Instruct.md"
     }
     folder_path="/home/changrui/readme_generator/src/readme_generator/reference_example"
     origin_reference_example_list=load_all_markdown_files(folder_path=folder_path)
