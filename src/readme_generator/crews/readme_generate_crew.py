@@ -2,53 +2,60 @@ import sys
 import os
 
 root_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "../.."))
-
-# 将根路径添加到 sys.path，让 Python 能识别 readme_generator 模块
 if root_path not in sys.path:
     sys.path.append(root_path)
-    
-from crewai import Agent,Crew,Process,Task
-from crewai.project import CrewBase,agent,crew,task
+
+from crewai import Agent, Crew, Process, Task
+from crewai.project import CrewBase, agent, crew, task
 from crewai.llm import LLM
-from readme_generator.tools.memory_tool import MemoryTool
 from readme_generator.tools.generate_readme_tool import GenerateReadmeTool
-from readme_generator.tools.get_step import create_step_callback
+
+LLM_BASE_URL = os.getenv("README_GENERATOR_LLM_BASE_URL", "http://10.54.34.78:30000/v1")
+LLM_MODEL = os.getenv("README_GENERATOR_LLM_MODEL", "your-local-model")
+LLM_API_KEY = os.getenv("README_GENERATOR_LLM_API_KEY", "empty")
+
 
 @CrewBase
 class ReadmeGeneratorCrew:
-    agents_config="config/readme_generate_agents.yaml"
-    tasks_config="config/readme_generate_tasks.yaml"
-    # llm=CustomChatOpenAI(base_url="http://10.54.34.78:30000/v1",password="empty")
+    agents_config = "config/readme_generate_agents.yaml"
+    tasks_config = "config/readme_generate_tasks.yaml"
     llm = LLM(
-        model="your-local-model",
-        base_url="http://10.54.34.78:30000/v1",
-        api_key="empty"
+        model=LLM_MODEL,
+        base_url=LLM_BASE_URL,
+        api_key=LLM_API_KEY,
     )
 
+    def __init__(self, global_memory):
+        self.global_memory = global_memory
+        GenerateReadmeTool.global_memory = global_memory
+
     @agent
-    def readme_generator_agent(self)->Agent:
-        memory_store_tool=GenerateReadmeTool.memory_store_model_readme
-        memory_retrieve_tool=GenerateReadmeTool.memory_retrieve_model_all_info
-        batch_generate_model_readme_tool=GenerateReadmeTool.batch_generate_model_readme
-        get_reference_example=GenerateReadmeTool.get_reference_example_list
+    def readme_generator_agent(self) -> Agent:
         return Agent(
             config=self.agents_config["readme_generator_agent"],
+            tools=[
+                GenerateReadmeTool.memory_retrieve_generation_context,
+                GenerateReadmeTool.memory_store_family_artifacts,
+                GenerateReadmeTool.memory_store_family_content,
+            ],
             llm=self.llm,
-            tools=[memory_store_tool,memory_retrieve_tool,batch_generate_model_readme_tool,get_reference_example],
             verbose=True,
-            allow_delegation=True,
+            allow_delegation=False,
         )
-    
+
     @task
-    def readme_generate(self)->Task:
-        return Task(config=self.tasks_config["readme_generate_task"])
-    
+    def adaptive_readme_generation_task(self) -> Task:
+        return Task(
+            config=self.tasks_config["adaptive_readme_generation_task"],
+            agent=self.readme_generator_agent(),
+        )
+
     @crew
-    def crew(self)->Crew:
+    def crew(self) -> Crew:
         return Crew(
             agents=self.agents,
             tasks=self.tasks,
             process=Process.sequential,
             verbose=True,
-            stream=True
+            stream=True,
         )

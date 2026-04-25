@@ -13,16 +13,23 @@ from crewai.llm import LLM
 from readme_generator.tools.memory_tool import MemoryTool
 from readme_generator.tools.input_parser_tool import InputParseTool
 
+LLM_BASE_URL = os.getenv("README_GENERATOR_LLM_BASE_URL", "http://10.54.34.78:30000/v1")
+LLM_MODEL = os.getenv("README_GENERATOR_LLM_MODEL", "your-local-model")
+LLM_API_KEY = os.getenv("README_GENERATOR_LLM_API_KEY", "empty")
+
 @CrewBase
 class InputParserCrew:
     agents_config="config/input_parser_agents.yaml"
     tasks_config="config/input_parser_tasks.yaml"
 
     llm=LLM(
-        model="your-local-model",
-        base_url="http://10.54.34.78:30000/v1",
-        api_key="empty"
+        model=LLM_MODEL,
+        base_url=LLM_BASE_URL,
+        api_key=LLM_API_KEY
     )
+
+    def __init__(self, global_memory=None):
+        self.global_memory = global_memory
 
     @agent
     def input_parser_agent(self)->Agent:

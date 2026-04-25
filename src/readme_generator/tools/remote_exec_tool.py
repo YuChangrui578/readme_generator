@@ -1,385 +1,417 @@
-import os
-os.environ["HF_HUB_OFFLINE"] = "1"
-os.environ["TRANSFORMERS_OFFLINE"] = "1"
-import time
-from typing import List,Dict,Optional,Any
-from pydantic import BaseModel,Field
-from crewai.tools import tool
-import re
-import paramiko
-import tempfile
-import sys
 import json
-import select
-from crewai.llm import LLM
-from .memory_tool import GlobalMemory
-from .chatopenai import LLM_Callable
-from langchain_core.prompts import PromptTemplate
-from langchain_core.runnables import RunnableLambda,RunnableParallel,RunnablePassthrough
-from langchain_core.output_parsers import StrOutputParser
+import re
+from typing import Any, Dict, List, Optional
+
+import requests
+from crewai.tools import tool
 
 
-class RemoteGeneralExecutor:
-    def __init__(
-        self,
-        host:str,
-        user_name:str,
-        password:Optional[str]=None,
-        key_filename:Optional[str]=None,
-        port:int=22,
-    ):
-        self.host=host
-        self.user_name=user_name
-        self.password=password
-        self.key_filename=key_filename
-        self.port=port
-        self.ssh=None
-    
-    def connect(self):
-        self.ssh=paramiko.SSHClient()
-        self.ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-
-        connect_args={
-            "hostname":self.host,
-            "username":self.user_name,
-            "port":self.port,
-            "timeout":15
-        }
-        if self.key_filename:
-            connect_args["key_filename"]=os.path.expanduser(self.key_filename)
-        else:
-            connect_args["password"]=self.password
-        self.ssh.connect(**connect_args)
-        print("✅ SSH 连接成功")
-
-    def disconnect(self):
-        if self.ssh:
-            try:
-                self.ssh.close()
-            finally:
-                self.ssh=None   
-    
-    def execute_commands(self,command_list:List[str],remote_folder:str)->List[Dict[str,Any]]:
-        if not self.ssh:
-            raise Exception("请先调用connect()建立ssh连接")
-        results=[]
-        remote_folder=remote_folder.strip()
-        for cmd in command_list:
-            full_cmd=f"cd {remote_folder} && {cmd}"
-            stdin,stdout,stderr=self.ssh.exec_command(full_cmd,timeout=400)
-            output=stdout.read().decode("utf-8",errors="ignore")
-            error=stderr.read().decode("utf-8",errors="ignore")
-            exit_code=stdout.channel.recv_exit_status()
-            results.append({
-                "command":cmd,
-                "full_command":full_cmd,
-                "remote_folder":remote_folder,
-                "output":output,
-                "error":error,
-                "exit_code":exit_code
-            })
-        return results
-    
 class RemoteExecutionClient:
-    def __init__(self):
-        self.llm=LLM_Callable(
-            base_url="http://10.54.34.78:30000/v1",
-            api_key="empty",
-            model_name="local-model"
-        )
-    
-    def build_command(self,readme,option):
-        """Extracts shell commands from README content based on the specified option.
-        - If option is "build_sglang_env": Extract environment setup commands (clone, install, docker build).
-        - If option is "test_model_building": Extract test commands (model download, server launch, benchmark).
-        Input Parameters:
-        - readme (str): Full README content text.
-        - option (str): "build_sglang_env" or "test_model_building".
-        
-        Returns:
-        - List[str]: Clean list of extracted shell commands, no thinking, no markdown, no explanations.
-        """
-        template="""
-        You are an expert DevOps engineer who UNDERSTANDS technical documentation and GENERATES executable shell commands.
+    def __init__(self, timeout: int = 120):
+        self.timeout = timeout
 
-YOUR TASK:
-1. READ and UNDERSTAND the full README content
-2. EXTRACT all relevant context: repo URLs, branch names, Dockerfile names, model names, paths, etc.
-3. GENERATE complete, executable shell commands based on the option
-4. DO NOT just "extract" - INFER and COMPLETE commands if only references are present
-
-STRICT RULES:
-1. NO thinking, NO reasoning, NO explanations
-2. NO markdown, NO code blocks, NO ```
-3. ONE command PER LINE
-4. ALL placeholders MUST be replaced with reasonable defaults or extracted values
-5. If README mentions a repo but no clone command, GENERATE the git clone command
-6. If README mentions a Dockerfile but no build command, GENERATE the docker build command
-7. If README mentions a model but no download command, GENERATE the huggingface-cli download command
-8. If NO commands can be generated, output EXACTLY: NO_COMMANDS_FOUND
-
-README CONTENT:
-{readme_content}
-
-OPTION: {option}
-
-WHAT TO GENERATE BASED ON OPTION:
-- If option == "build_sglang_env":
-  Generate commands for:
-  - git clone (with correct URL and branch from README)
-  - docker pull / docker build (with correct image name, Dockerfile from README)
-  - pip install / conda install (inferred from README context)
-  EXCLUDE: model download, server launch, benchmark
-
-- If option == "test_model_building":
-  Generate commands for:
-  - huggingface-cli download (with model ID from README)
-  - sglang serve / launch_server (with model path from README)
-  - bench_serving / benchmark commands (inferred from README)
-  EXCLUDE: initial environment setup
-
-NOW GENERATE ONLY THE EXECUTABLE COMMANDS:"""
-        prompt=template.format(readme_content=readme,option=option)
-        command=self.llm.invoke(inputs=prompt).strip()
-        import re
-        command=re.sub(r"<think>.*?</think>","",command,flags=re.DOTALL)
-        command = command.strip()
-
-        if command == "NO_COMMANDS_FOUND":
+    @staticmethod
+    def extract_commands_from_readme(readme: str) -> List[str]:
+        if not readme:
             return []
 
-        return [
-            line.strip()
-            for line in command.splitlines()
-            if line.strip() and not line.strip().startswith("#")
-        ]
-    
-    def detect_quantization_from_model_id(self,model_id):
-        suffixes=["fp8","int8","awq","gptq","w8a8_int"]
-        for suf in suffixes:
-            if model_id.lower().encswith("w8a8"):
-                return "w8a8_int"
-            if model_id.lower().endswith(suf):
-                return suf
-        return None
-    
-    def fix_quantization_arg(self,commands,q_type):
-        fixed=[]
-        if type(commands)==str:
-            commands=json.loads(commands)
-        for cmd in commands:
-            cmd=re.sub(r"--quantization\s+\S+","",cmd).strip()
-            if q_type and q_type=="w8a8":
-                cmd+="--quantization w8a8_int"
-            if q_type:
-                cmd+=f"--quantization {q_type}"
-            fixed.append(cmd)
-        return fixed 
-    
-    def fix_commands_by_llm(self,cmds:List[str],error_log:str)->List[str]:
-        prompt = f"""
-        You are a senior Linux & SGLANG deployment expert.
-        Fix the following commands based on the error log.
+        commands: List[str] = []
+        for block in re.findall(r"```(?:bash|shell)\s*([\s\S]*?)```", readme, flags=re.IGNORECASE):
+            for line in block.splitlines():
+                cmd = line.strip()
+                if not cmd or cmd.startswith("#"):
+                    continue
+                commands.append(cmd)
+        return commands
 
-        Original commands:
-        {cmds}
+    @staticmethod
+    def _parse_stream_chunks(stream_chunks: List[str]) -> Dict[str, Any]:
+        parsed_events: List[Any] = []
+        text_events: List[str] = []
+        reconstructed_text: List[str] = []
+        for chunk in stream_chunks:
+            if chunk in ("[DONE]", "DONE"):
+                continue
+            try:
+                parsed = json.loads(chunk)
+                parsed_events.append(parsed)
+                if isinstance(parsed, dict):
+                    choices = parsed.get("choices")
+                    if isinstance(choices, list) and choices:
+                        delta = choices[0].get("delta", {}) if isinstance(choices[0], dict) else {}
+                        content = delta.get("content") if isinstance(delta, dict) else None
+                        if isinstance(content, str) and content:
+                            reconstructed_text.append(content)
+                    text_val = parsed.get("text") or parsed.get("content")
+                    if isinstance(text_val, str) and text_val:
+                        reconstructed_text.append(text_val)
+                continue
+            except Exception:
+                pass
+            text_events.append(chunk)
 
-        Error log:
-        {error_log}
+        merged_text = "".join(reconstructed_text).strip()
+        if not merged_text and text_events:
+            merged_text = "\n".join(text_events).strip()
 
-        Rules:
-        1. Keep original command purpose and order.
-        2. Fix only what is wrong.
-        3. If missing SGLANG CPU env, add:
-        cd /home/sdp/changrui && source .venv/bin/activate && export SGLANG_USE_CPU_ENGINE=1
-        4. If permission denied: add sudo or chmod +x.
-        5. If path not exist: add mkdir -p.
-        6. If download failed: add --resume-download.
-        7. Output ONLY the final command list, one per line.
-        No extra words, no markdown, no explanation.
-        """
+        if parsed_events:
+            return {"events": parsed_events, "text": merged_text}
+        if text_events:
+            return {"raw_response": merged_text}
+        return {}
 
-        fixed_text=self.llm.invoke(prompt).strip()
-        import re
-        fixed_text=re.sub(r"<think>.*?</think>","",fixed_text,flags=re.DOTALL)
-        fixed_text = fixed_text.strip()
-        fixed_cmds=[
-            line.strip()
-            for line in fixed_text.splitlines()
-            if line.strip() and not line.strip().startswith("#")
-        ]
-        return fixed_cmds if fixed_cmds else cmds
-    
+    @staticmethod
+    def _read_sse_events(response: requests.Response) -> List[Dict[str, Any]]:
+        events: List[Dict[str, Any]] = []
+        current_event = "message"
+        data_lines: List[str] = []
 
-class RemoteExecutionTool:
-    client=RemoteExecutionClient()
+        def flush_event() -> None:
+            nonlocal current_event, data_lines
+            if not data_lines:
+                current_event = "message"
+                return
+            raw_data = "\n".join(data_lines).strip()
+            try:
+                parsed_data: Any = json.loads(raw_data)
+            except Exception:
+                parsed_data = raw_data
+            events.append({"event": current_event, "data": parsed_data, "raw_data": raw_data})
+            print(f"[remote_stream][{current_event}] {raw_data}")
+            current_event = "message"
+            data_lines = []
 
-    @tool("get_sglang_environment")
-    def get_sglang_environment():
-        """Get the official SGLANG CPU environment activation command.
-        Returns: shell command string to activate SGLANG CPU environment.
-        """
-        return (
-            "cd /home/sdp/changrui && source .venv/bin/activate && "
-            "export SGLANG_USE_CPU_ENGINE=1 && "
-            "export LD_LIBRARY_PATH=/usr/lib/x86_64-linux-gnu && "
-            "export LD_PRELOAD=/home/sdp/changrui/.venv/lib/libiomp5.so"
-        )
+        for line in response.iter_lines(decode_unicode=True):
+            if line is None:
+                continue
+            chunk = line.strip()
+            if not chunk:
+                flush_event()
+                continue
+            if chunk.startswith(":"):
+                continue
+            if chunk.startswith("event:"):
+                current_event = chunk[6:].strip() or "message"
+                continue
+            if chunk.startswith("data:"):
+                data_lines.append(chunk[5:].strip())
+                continue
+            data_lines.append(chunk)
 
-    @tool("execute_on_remote_server")
-    def execute_on_remote_server(commands:List[str],remote_folder:str)->str:
-        """Execute shell commands on remote server via SSH.
-        Automatically loads SSH_CONFIG from GLOBAL_MEMORY.
-        Inputs: list of commands, remote working folder
-        Returns: execution log string containing stdout, stderr, exit codes."""
-        memory=GlobalMemory()
-        ssh=memory.memory_retrieve("ssh_config")
-        executor=RemoteGeneralExecutor(host=ssh["hostname"],user_name=ssh["user_name"],password=ssh["password"],
-                                       port=ssh["port"])
-        executor.connect()
-        results=executor.execute_commands(
-            command_list=commands,
-            remote_folder=remote_folder
-        )
-        executor.disconnect()
-        return results
-    
-    @tool("check_remote_model_exists")
-    def check_remote_model_exists(model_id:str,remote_folder:str):
-        """Check if the model exists in remote server's models folder.
-        Inputs: model_id, remote_folder
-        Returns: True if model exists, False otherwise."""
-        from shlex import quote  # 安全转义路径，防止特殊字符/命令注入
+        flush_event()
+        return events
 
-        memory = GlobalMemory()
-        ssh = memory.memory_retrieve("ssh_config")
+    @staticmethod
+    def _parse_sse_events(events: List[Dict[str, Any]]) -> Dict[str, Any]:
+        reconstructed: List[str] = []
+        for item in events:
+            data = item.get("data")
+            if isinstance(data, dict):
+                if isinstance(data.get("chunk"), str) and data.get("chunk"):
+                    reconstructed.append(data["chunk"])
+                    continue
+                if isinstance(data.get("content"), str) and data.get("content"):
+                    reconstructed.append(data["content"])
+                    continue
+                if isinstance(data.get("message"), str) and data.get("message"):
+                    reconstructed.append(data["message"])
+                    continue
+            if isinstance(data, str) and data:
+                reconstructed.append(data)
+        return {"events": events, "text": "".join(reconstructed).strip()}
 
-        # 拼接完整模型路径（自动支持嵌套 model_id）
-        model_full_path = f"{remote_folder}/models/{model_id}"
-        # 安全转义，处理空格、/、.、-、: 等所有特殊字符
-        safe_path = quote(model_full_path)
-
-        # 安全判断远程目录是否存在（标准、兼容所有 Linux）
-        cmd = f"test -d {safe_path} && echo EXISTS || echo NOT_EXISTS"
-
-        executor = RemoteGeneralExecutor(
-            host=ssh["hostname"],
-            user_name=ssh["user_name"],
-            password=ssh["password"],
-            port=22
-        )
+    def validate_model_readme(
+        self,
+        request_url: str,
+        model_id: str,
+        content: str,
+        extra_payload: Optional[Dict[str, Any]] = None,
+        stream: bool = True,
+        include_extracted_commands: bool = False,
+    ) -> Dict[str, Any]:
+        payload = {
+            "model_id": model_id,
+            "content": content,
+        }
+        if include_extracted_commands:
+            payload["commands"] = self.extract_commands_from_readme(content)
+        if extra_payload:
+            payload.update(extra_payload)
 
         try:
-            executor.connect()
-            results = executor.execute_commands(
-                command_list=[cmd],
-                remote_folder=remote_folder
+            if stream:
+                response = requests.post(
+                    request_url,
+                    json=payload,
+                    timeout=self.timeout,
+                    stream=True,
+                    headers={"Accept": "text/event-stream"},
+                )
+                response.raise_for_status()
+                content_type = str(response.headers.get("Content-Type", "")).lower()
+                if "text/event-stream" in content_type:
+                    sse_events = self._read_sse_events(response)
+                    parsed_payload = self._parse_sse_events(sse_events)
+                    stream_output = [json.dumps(evt, ensure_ascii=False) for evt in sse_events]
+                else:
+                    stream_chunks: List[str] = []
+                    for line in response.iter_lines(decode_unicode=True):
+                        if not line:
+                            continue
+                        chunk = line.strip()
+                        if not chunk:
+                            continue
+                        stream_chunks.append(chunk)
+                        print(f"[remote_stream] {chunk}")
+                    parsed_payload = self._parse_stream_chunks(stream_chunks)
+                    stream_output = stream_chunks
+
+                return {
+                    "ok": True,
+                    "status_code": response.status_code,
+                    "request_url": request_url,
+                    "request_payload": payload,
+                    "response": parsed_payload,
+                    "stream_output": stream_output,
+                    "used_stream": True,
+                }
+
+            response = requests.post(
+                request_url,
+                json=payload,
+                timeout=self.timeout,
             )
-            # 判断结果（兼容多行输出、空白字符）
-            # 新代码（正确）
-            output = results[0]["output"].strip()
-            return "EXISTS" in output
+            response.raise_for_status()
+            try:
+                response_payload = response.json()
+            except ValueError:
+                response_payload = {"raw_response": response.text}
+            return {
+                "ok": True,
+                "status_code": response.status_code,
+                "request_url": request_url,
+                "request_payload": payload,
+                "response": response_payload,
+                "used_stream": False,
+            }
+        except Exception as e:
+            return {
+                "ok": False,
+                "status_code": None,
+                "request_url": request_url,
+                "response": {},
+                "error": str(e),
+                "used_stream": stream,
+            }
 
-        finally:
-            # 确保无论是否异常，都断开连接
-            executor.disconnect()
-    
-    @tool("download_model_from_huggingface")
-    def download_model_from_huggingface(model_url:str,model_id:str,remote_folder:str):
-        """ Download model from Hugging Face to remote server when model does not exist.
-        Inputs: model_url (Hugging Face repo ID), remote_folder
-        Returns: download execution log."""
-        memory=GlobalMemory()
-        ssh=memory.memory_retrieve("ssh_config")
-        commands = [
-            f"mkdir -p {remote_folder}/models",
-            f"cd {remote_folder}/models",
-            f"huggingface-cli download {model_url} --local-dir {model_id} --local-dir-use-symlinks False"
-        ]
-        executor=RemoteGeneralExecutor(host=ssh["hostname"],user_name=ssh["user_name"],password=ssh["password"],
-                                       port=ssh["port"])
-        executor.connect()
-        res=executor.execute_commands(commands,remote_folder=remote_folder)
-        executor.disconnect()
-        return res
 
-    @tool("build_command")
-    def build_command(readme_str:str,option:str):
-        """Extract shell commands from model_readme.
-        Options: "build_sglang_env" (extract clone & docker build commands), "test_model_building" (extract test commands)
-        Inputs: readme content, option
-        Returns: list of extracted shell commands."""
-        return RemoteExecutionTool.client.build_command(readme=readme_str,option=option)
+class RemoteExecutionTool:
+    client = RemoteExecutionClient()
+    global_memory = None
+
+    @staticmethod
+    def _normalize_list(value: Any) -> List[str]:
+        if isinstance(value, list):
+            return [str(v) if v is not None else "" for v in value]
+        if isinstance(value, str):
+            try:
+                parsed = json.loads(value)
+                if isinstance(parsed, list):
+                    return [str(v) if v is not None else "" for v in parsed]
+            except Exception:
+                pass
+            return [value]
+        return []
+
+    @staticmethod
+    def _compose_model_content_from_family(
+        model_id: str,
+        model_name: str,
+        model_url: str,
+        github_url: str,
+        family_md: str,
+        family_index_js: str,
+    ) -> str:
+        branch_mode = "dev_branch" if str(github_url or "").strip() else "official"
+        model_header = (model_id or model_name or "").strip()
+        model_url = (model_url or "").strip()
+        github_url = (github_url or "").strip()
+        family_md = (family_md or "").strip()
+        family_index_js = (family_index_js or "").strip()
+
+        if not family_md or not family_index_js:
+            return ""
+
+        return (
+            f"## Target Model\n"
+            f"- model_id: {model_id}\n"
+            f"- model_name: {model_name}\n"
+            f"- model_url: {model_url}\n"
+            f"- mode: {branch_mode}\n"
+            f"- github_url: {github_url}\n\n"
+            "## Rewriting Requirement\n"
+            f"Use the full family README.md and index.js below to derive commands and test logic for ONLY this target model ({model_header}). "
+            "Do not execute other model variants.\n\n"
+            "## Family README.md (full)\n\n"
+            f"{family_md}\n\n"
+            "## Family index.js (full)\n\n"
+            "```javascript\n"
+            f"{family_index_js}\n"
+            "```"
+        ).strip()
+
+    @staticmethod
+    def _resolve_model_content_list() -> Dict[str, Any]:
+        model_list = RemoteExecutionTool._normalize_list(
+            RemoteExecutionTool.global_memory.memory_retrieve("model_list") or []
+        )
+        model_id_list = RemoteExecutionTool._normalize_list(
+            RemoteExecutionTool.global_memory.memory_retrieve("model_id_list") or []
+        )
+        model_url_list = RemoteExecutionTool._normalize_list(
+            RemoteExecutionTool.global_memory.memory_retrieve("model_url_list") or []
+        )
+        github_url_list = RemoteExecutionTool._normalize_list(
+            RemoteExecutionTool.global_memory.memory_retrieve("github_url") or []
+        )
+        family_md = str(
+            RemoteExecutionTool.global_memory.memory_retrieve("family_md") or ""
+        ).strip()
+        family_index_js = str(RemoteExecutionTool.global_memory.memory_retrieve("family_index_js") or "").strip()
+        if not family_md:
+            raise ValueError("family_md is required for remote execution.")
+        if not family_index_js:
+            raise ValueError("family_index_js is required for remote execution.")
+        if not model_id_list:
+            raise ValueError("model_id_list is required for remote execution.")
+
+        derived: List[str] = []
+        for i in range(len(model_id_list)):
+            derived.append(
+                RemoteExecutionTool._compose_model_content_from_family(
+                    model_id=model_id_list[i] if i < len(model_id_list) else "",
+                    model_name=model_list[i] if i < len(model_list) else "",
+                    model_url=model_url_list[i] if i < len(model_url_list) else "",
+                    github_url=github_url_list[i] if i < len(github_url_list) else "",
+                    family_md=family_md,
+                    family_index_js=family_index_js,
+                )
+            )
+        return {
+            "model_content_list": derived,
+            "warning": "",
+        }
+
+    @staticmethod
+    def _resolve_request_url() -> str:
+        ssh_config = RemoteExecutionTool.global_memory.memory_retrieve("ssh_config") or {}
+        # Preferred override: full URL in ssh_config.request_url
+        # Otherwise composed by ssh_config.hostname/request_scheme/request_port/request_endpoint
+        if ssh_config.get("request_url"):
+            return ssh_config["request_url"]
+
+        host = ssh_config.get("hostname")
+        if not host:
+            raise ValueError("Missing request_url or hostname in ssh_config.")
+
+        scheme = ssh_config.get("request_scheme", "http")
+        port = ssh_config.get("request_port", 8000)
+        request_stream = bool(ssh_config.get("request_stream", False))
+        default_endpoint = "/bkc_test/stream" if request_stream else "/bkc_test"
+        endpoint = ssh_config.get("request_endpoint", default_endpoint)
+        return f"{scheme}://{host}:{port}{endpoint}"
+
+    @staticmethod
+    def _build_execution_context() -> Dict[str, Any]:
+        resolved_content = RemoteExecutionTool._resolve_model_content_list()
+        return {
+            "model_list": RemoteExecutionTool.global_memory.memory_retrieve("model_list") or [],
+            "model_id_list": RemoteExecutionTool.global_memory.memory_retrieve("model_id_list") or [],
+            "model_url_list": RemoteExecutionTool.global_memory.memory_retrieve("model_url_list") or [],
+            "github_url": RemoteExecutionTool.global_memory.memory_retrieve("github_url") or [],
+            "family_md": RemoteExecutionTool.global_memory.memory_retrieve("family_md") or "",
+            "family_index_js": RemoteExecutionTool.global_memory.memory_retrieve("family_index_js") or "",
+            "family_content": RemoteExecutionTool.global_memory.memory_retrieve("family_content") or "",
+            "model_content_list": resolved_content["model_content_list"],
+            "content_resolution_warning": resolved_content["warning"],
+            "execution_result": RemoteExecutionTool.global_memory.memory_retrieve("execution_result") or [],
+            "executed_command": RemoteExecutionTool.global_memory.memory_retrieve("executed_command") or [],
+            "fail_reason_list": RemoteExecutionTool.global_memory.memory_retrieve("fail_reason_list") or [],
+            "ssh_config": RemoteExecutionTool.global_memory.memory_retrieve("ssh_config") or {},
+        }
 
     @tool("memory_retrieve_execution_context")
     def memory_retrieve_execution_context():
         """Retrieve all information needed for remote execution from GLOBAL_MEMORY.
-        Returns: dictionary containing model_id_list, model_url_list, model_readme, github_url, ssh_config."""
-        memory=GlobalMemory()
-        return {
-            "model_id_list":memory.memory_retrieve("model_id_list"),
-            "model_url_list":memory.memory_retrieve("model_url_list"),
-            "model_readme":memory.memory_retrieve("model_readme"),
-            "github_url":memory.memory_retrieve("github_url"),
-            "executed_command":memory.memory_retrieve("executed_command"),
-            "execution_result":memory.memory_retrieve("execution_result"),
-            "fail_reason_list":memory.memory_retrieve("fail_reason_list"),
-            "ssh_config":memory.memory_retrieve("ssh_config"),
-            "remote_folder":memory.memory_retrieve("remote_folder")
-        }
-    
-    @tool("detect_quantization_from_model_id")
-    def detect_quantization_from_model_id(model_id):
-        """ Detect quantization type from model_id suffix.
-        Input: model_id
-        Returns: quantization type (e.g., "fp8", "int8", "int4") or None if no quantization."""
-        return RemoteExecutionTool.client.detect_quantization_from_model_id(model_id=model_id)
+        Returns: dictionary containing model_id_list, per-model model_content_list and request config."""
+        return RemoteExecutionTool._build_execution_context()
 
-    @tool("fix_command_quantization")
-    def fix_command_quantization(commands,q_type):
-        """Automatically fix --quantization parameter in commands.
-        Inputs: list of commands, quantization type
-        Returns: list of commands with corrected --quantization parameter."""
-        return RemoteExecutionTool.client.fix_quantization_arg(commands=commands,q_type=q_type)
+    @tool("memory_preview_remote_content")
+    def memory_preview_remote_content(preview_chars: int = 1000) -> Dict[str, Any]:
+        """Preview per-model content that will be sent to remote API before execution.
+        Returns model-level summaries including content length and truncated preview."""
+        context = RemoteExecutionTool._build_execution_context()
+        model_ids = context.get("model_id_list") or []
+        model_contents = context.get("model_content_list") or []
+        preview_items: List[Dict[str, Any]] = []
+
+        for idx, model_id in enumerate(model_ids):
+            content = model_contents[idx] if idx < len(model_contents) else ""
+            preview_items.append(
+                {
+                    "idx": idx,
+                    "model_id": model_id,
+                    "content_length": len(content or ""),
+                    "content_preview": (content or "")[: max(0, int(preview_chars))],
+                }
+            )
+
+        return {
+            "count": len(preview_items),
+            "content_resolution_warning": context.get("content_resolution_warning", ""),
+            "items": preview_items,
+        }
+
+    @tool("execute_remote_readme_validation")
+    def execute_remote_readme_validation(model_id: str, model_content: str) -> Dict[str, Any]:
+        """Validate single-model content (md+js) on remote local-bkc agent by one HTTP request.
+        Inputs: model_id, model_content
+        Returns: remote validation result payload."""
+        request_url = RemoteExecutionTool._resolve_request_url()
+        ssh_config = RemoteExecutionTool.global_memory.memory_retrieve("ssh_config") or {}
+        extra_payload = ssh_config.get("request_payload", {})
+        request_stream = bool(ssh_config.get("request_stream", False))
+        include_extracted_commands = bool(ssh_config.get("include_extracted_commands", False))
+        return RemoteExecutionTool.client.validate_model_readme(
+            request_url=request_url,
+            model_id=model_id,
+            content=model_content,
+            extra_payload=extra_payload,
+            stream=request_stream,
+            include_extracted_commands=include_extracted_commands,
+        )
 
     @tool("memory_store_execution_result")
     def memory_store_execution_result(
-        idx:int,
-        command_str:str,
-        result:str,
-        fail_reason:Optional[str],
-        updated_readme:Optional[str]
+        idx: int,
+        command_str: str,
+        result: Any,
+        fail_reason: Optional[str],
+        updated_readme: Optional[str],
     ):
         """Store remote execution results into GLOBAL_MEMORY at specified index.
         Inputs: index, executed command, execution result, fail reason, updated readme
         Returns: success message."""
-        def update_list(key,value):
-            memory=GlobalMemory()
-            lst=memory.memory_retrieve(key=key) or []
-            while len(lst)<=idx:
-                lst.append(None)
-            lst[idx]=value
-            memory.memory_store(key=key,value=lst)
-        
-        update_list("executed_command",command_str)
-        update_list("execution_result",result)
-        update_list("fail_reason_list",fail_reason)
-        if updated_readme:
-            update_list("model_readme",updated_readme)
-        return True
 
-    @tool("retry_allowed")
-    def retry_allowed(current:int,max_retry=2):
-        """Check if retry is allowed based on current retry count.
-        Inputs: current retry count, max retry count (default 2)
-        Returns: True if retry allowed, False otherwise."""
-        return current<max_retry
-    
-    @tool("fix_command_errors")
-    def fix_command_errors(cmds:List[str],err:str)->List[str]:
-        """Use LLM to intelligently analyze remote execution error logs and automatically fix commands.
-        Fixes: command not found, permission denied, path error, environment missing, library issues, etc.
-        Inputs: list of original commands, error log
-        Returns: list of fixed commands."""
-        return RemoteExecutionTool.client.fix_commands_by_llm(cmds=cmds,error_log=err)
-    
+        def update_list(key, value):
+            lst = RemoteExecutionTool.global_memory.memory_retrieve(key=key) or []
+            while len(lst) <= idx:
+                lst.append(None)
+            lst[idx] = value
+            RemoteExecutionTool.global_memory.memory_store(key=key, value=lst)
+
+        update_list("executed_command", command_str)
+        stored_result = result if isinstance(result, str) else json.dumps(result, ensure_ascii=False)
+        update_list("execution_result", stored_result)
+        update_list("fail_reason_list", fail_reason)
+        return True

@@ -3,6 +3,9 @@ input_parse_task:
     Complete input parsing and memory storage in strict sequence:
     Call get_input_text to obtain input_text from GLOBAL_MEMORY.
     Execute parse_input_text to process input_text and output two structured results: model_list and github_url (both as lists).
+    Enforce github_url alignment with model_list length:
+    - If github_url is shorter, pad with empty strings "" for official-sglang models.
+    - If only one github_url is provided for a mixed official/dev series, place it on the last model and fill previous with "".
     Invoke store_memory to save the parsed model_list and github_url into GLOBAL_MEMORY.
     Verify data standardization: ensure both fields are valid lists with proper default values if empty.
     The final GLOBAL_MEMORY shall contain:

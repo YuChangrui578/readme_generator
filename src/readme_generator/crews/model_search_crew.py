@@ -15,21 +15,28 @@ from readme_generator.tools.memory_tool import MemoryTool
 from readme_generator.tools.get_step import create_step_callback
 from langchain_openai import ChatOpenAI
 
+LLM_BASE_URL = os.getenv("README_GENERATOR_LLM_BASE_URL", "http://10.54.34.78:30000/v1")
+LLM_MODEL = os.getenv("README_GENERATOR_LLM_MODEL", "your-local-model")
+LLM_API_KEY = os.getenv("README_GENERATOR_LLM_API_KEY", "empty")
+
 @CrewBase
 class ModelSearchCrew:
     agents_config="config/model_search_agents.yaml"
     tasks_config="config/model_search_tasks.yaml"
     # llm=CustomChatOpenAI(base_url="http://10.54.34.78:30000/v1",password="empty")
     llm = LLM(
-        model="your-local-model",
-        base_url="http://10.54.34.78:30000/v1",
-        api_key="empty"
+        model=LLM_MODEL,
+        base_url=LLM_BASE_URL,
+        api_key=LLM_API_KEY
     )
     # llm = LLM(
     #     model="your-local-model",
     #     base_url="http://10.112.229.29:30000/v1",
     #     api_key="empty"
     # )
+
+    def __init__(self, global_memory=None):
+        self.global_memory = global_memory
 
     @agent
     def model_search_agent(self)->Agent:

@@ -1,17 +1,14 @@
 github_pr_task:
   description: >
-    Perform the full GitHub PR workflow using parameters including {github_token}, {repo_owner}, {repo_name}, {base_branch}, {head_branch}, {pr_title}, {pr_description}, {commit_message}, and custom upload {path}.
-    1. Use the memory_retrieve tool to get the finalized merged_readme from GLOBAL_MEMORY.
-    2. Authenticate to GitHub and check if the target branch and PR exist.
-    3. Push the merged README content to the custom path in the target branch.
-    4. Automatically resolve the "No commits between branches" error by creating an empty commit if needed.
-    5. Create a new PR if none exists, or update the existing PR with the latest title and description.
-    6. Use the memory_store tool to save PR information (PR number, URL, status) into GLOBAL_MEMORY.
+    Retrieve publish context from memory and publish artifacts to GitHub.
+    Support:
+    1) legacy path/md_path + js_path mode (family README.md + family index.js)
+    2) folder path mode (e.g. Xeon/Llama/ => auto publish README.md + index.js in that folder)
+    3) multi-file mode using github_config.publish_items/files/upload_files
+       where each item can target different folders/files.
+    Validate github config, ensure target branch exists, upsert all files, and create or update PR.
+    Use publish_family_artifacts to perform upload and PR operations.
+    Persist PR info to GLOBAL_MEMORY.
   expected_output: >
-    A complete PR execution report including:
-    - PR status (created / updated)
-    - PR number and URL
-    - Commit and file upload status
-    - Confirmation that the merged README was pushed to the custom path
-    All PR metadata is persisted in GLOBAL_MEMORY for traceability.
+    A publish result containing PR status/URL/number and uploaded file commit SHAs.
   agent: github_agent

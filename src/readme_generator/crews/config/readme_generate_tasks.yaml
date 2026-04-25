@@ -1,12 +1,10 @@
-readme_generate_task:
+adaptive_readme_generation_task:
   description: >
-    1. Use the get_reference_example_list tool to obtain reference_example_list through the github_url list (retrieved from GLOBAL_MEMORY), ensuring the length of reference_example_list is consistent with model_list, and each element is in one-to-one index correspondence with model_list.
-    2. Use the memory_retrieve_model_all_info tool to retrieve model_list, model_id_list, and model_url_list from GLOBAL_MEMORY (note: model_name_list is consistent with model_list, so model_list is used uniformly for processing).
-    3. Perform batch README generation: take the corresponding element in reference_example_list as the template (one-to-one index matching), replace the model-related placeholders in the template with the corresponding elements in model_list, model_id_list, and model_url_list (strictly matching by index), and generate a complete, standardized README document for each model in model_list.
-    4. Ensure the generated README list has the same length as model_list, and each element is in one-to-one index correspondence with model_list, model_url_list, model_id_list, and reference_example_list.
-    5. Finally, use the memory_store_model_readme tool to save the generated README list into GLOBAL_MEMORY with the storage key specified as "model_readme", which is used for subsequent merge_readme_agent and remote_execution_agent calls.
+    Generate aligned family README.md + index.js using agent-native reasoning as the primary generation engine.
+    Retrieve full generation context from memory, including ref_md, ref_index_js, model_list, and model_id_list.
+    Keep generation aligned to the model family context and ensure JS logic is fully handled (not markdown-only reasoning).
+    Do not copy the reference content blindly. The output must align to the current input models.
+    Store outputs with memory_store_family_artifacts(family_md, family_index_js), then ensure family_content is present.
   expected_output: >
-    1. A complete batch-generated model README list (model_readme), where each README corresponds to one model in model_list, and is strictly matched with model_id_list, model_url_list, and reference_example_list by index.
-    2. All README documents are standardized, with accurate model information (model name, model ID, Hugging Face URL) and consistent structure with the reference templates.
-    3. The model_readme list has been successfully stored in GLOBAL_MEMORY, and can be directly called by subsequent agents (merge_readme_agent, remote_execution_agent) without index confusion or information missing.
+    GLOBAL_MEMORY contains aligned family_md, family_index_js, and family_content.
   agent: readme_generator_agent

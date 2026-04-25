@@ -1,198 +1,342 @@
-import json
 import os
-import requests
-from github import Github,GithubException
-from github.Repository import Repository
-from github.Branch import Branch
-from github.PullRequest import PullRequest
-from github.ContentFile import ContentFile
-from crewai import Agent,Task
-# from langchain.tools import tool
-from crewai.tools import tool
-from typing import Dict,Optional,Tuple
 import traceback
-from .web_tool import backup_proxy_in_process,clear_proxy_in_process,restore_proxy_in_process
+from typing import Any, Dict, List, Optional
+
+from crewai.tools import tool
+from github import Github, GithubException
+from github.PullRequest import PullRequest
+from github.Repository import Repository
+
 from .memory_tool import GlobalMemory
+from .web_tool import clear_proxy_in_process, restore_proxy_in_process
 
-GITHUB_API="https://api.github.com"
+
+def _resolve_repo(github_config: Dict[str, Any]) -> Dict[str, str]:
+    repo_owner = (github_config.get("repo_owner") or "").strip()
+    repo_name = (github_config.get("repo_name") or "").strip()
+    repo_full = (github_config.get("repo") or "").strip()
+
+    if (not repo_owner or not repo_name) and repo_full and "/" in repo_full:
+        repo_owner, repo_name = repo_full.split("/", 1)
+
+    return {"repo_owner": repo_owner, "repo_name": repo_name}
 
 
-class GitHubClient:
-    def __init__(self,token:str,repo_name:str):
-        self.g=Github(token)
-        self.repo:Repository=self.g.get_repo(repo_name)
+class GithubPRTool:
+    global_memory = None
 
-    def get_branch(self,branch_name:str)->Optional[Branch]:
+    @staticmethod
+    def _proxy_restore():
+        return restore_proxy_in_process(
+            proxy_backup={
+                "http_proxy": "http://proxy-dmz.intel.com:912",
+                "https_proxy": "http://proxy-dmz.intel.com:912",
+            }
+        )
+
+    @staticmethod
+    def _proxy_clear(proxy_backup):
+        clear_proxy_in_process(proxy_backup=proxy_backup)
+
+    @staticmethod
+    def _read_github_config() -> Dict[str, Any]:
+        cfg = GithubPRTool.global_memory.memory_retrieve("github_config") or {}
+        token = (
+            (cfg.get("github_token") or "").strip()
+            or os.getenv("README_GENERATOR_GITHUB_TOKEN", "").strip()
+            or os.getenv("GITHUB_TOKEN", "").strip()
+            or os.getenv("GH_TOKEN", "").strip()
+        )
+        if token:
+            cfg["github_token"] = token
+        return cfg
+
+    @staticmethod
+    def _read_publish_content() -> str:
+        family_content = GithubPRTool.global_memory.memory_retrieve("family_content") or ""
+        return family_content if str(family_content).strip() else ""
+
+    @staticmethod
+    def _read_publish_artifacts() -> Dict[str, str]:
+        family_md = GithubPRTool.global_memory.memory_retrieve("family_md") or ""
+        family_index_js = GithubPRTool.global_memory.memory_retrieve("family_index_js") or ""
+        return {
+            "family_md": str(family_md or ""),
+            "family_index_js": str(family_index_js or ""),
+            "family_content": str(GithubPRTool._read_publish_content() or ""),
+        }
+
+    @staticmethod
+    def _is_directory_like(path: str) -> bool:
+        p = (path or "").strip()
+        if not p:
+            return False
+        if p.endswith("/"):
+            return True
+        last = p.rsplit("/", 1)[-1]
+        return "." not in last
+
+    @staticmethod
+    def _join_dir_file(dir_path: str, filename: str) -> str:
+        d = (dir_path or "").strip().rstrip("/")
+        return f"{d}/{filename}" if d else filename
+
+    @staticmethod
+    def _resolve_publish_targets(github_config: Dict[str, Any], artifacts: Dict[str, str]) -> List[Dict[str, str]]:
+        publish_items = github_config.get("publish_items") or github_config.get("files") or github_config.get("upload_files")
+        targets: List[Dict[str, str]] = []
+
+        if isinstance(publish_items, list) and publish_items:
+            for idx, item in enumerate(publish_items):
+                if not isinstance(item, dict):
+                    raise ValueError(f"publish_items[{idx}] must be an object")
+                raw_path = str(item.get("path") or "").strip()
+                if not raw_path:
+                    raise ValueError(f"publish_items[{idx}].path is required")
+                content = item.get("content")
+                content_key = str(item.get("content_key") or item.get("artifact") or "").strip()
+                if content is None:
+                    if not content_key:
+                        raise ValueError(f"publish_items[{idx}] must provide content or content_key/artifact")
+                    if content_key not in artifacts:
+                        raise ValueError(f"publish_items[{idx}].content_key {content_key} not found in artifacts")
+                    content = artifacts[content_key]
+                targets.append(
+                    {
+                        "path": raw_path,
+                        "content": str(content),
+                        "label": str(item.get("label") or content_key or f"file-{idx}"),
+                    }
+                )
+            return targets
+
+        # Legacy mode: publish family_md + family_index_js via md_path/js_path/path
+        md_path = (github_config.get("md_path") or github_config.get("path") or "").strip()
+        js_path = (github_config.get("js_path") or "").strip()
+        if not md_path:
+            raise ValueError("github_config.path (or md_path) is required for legacy publish mode")
+
+        if GithubPRTool._is_directory_like(md_path):
+            md_target = GithubPRTool._join_dir_file(md_path, "README.md")
+            js_target = GithubPRTool._join_dir_file(md_path, "index.js")
+        else:
+            md_target = md_path
+            if js_path:
+                js_target = (
+                    GithubPRTool._join_dir_file(js_path, "index.js")
+                    if GithubPRTool._is_directory_like(js_path)
+                    else js_path
+                )
+            elif "/" in md_target:
+                js_target = f"{md_target.rsplit('/', 1)[0]}/index.js"
+            else:
+                js_target = "index.js"
+
+        targets.append({"path": md_target, "content": artifacts["family_md"], "label": "README.md"})
+        targets.append({"path": js_target, "content": artifacts["family_index_js"], "label": "index.js"})
+        return targets
+
+    @staticmethod
+    def _ensure_branch(repo: Repository, branch_name: str, base_branch: str) -> str:
         try:
-            return self.repo.get_branch(branch_name)
+            repo.get_branch(branch_name)
+            return repo.get_branch(branch_name).commit.sha
         except GithubException:
-            return None 
-    
-    def create_branch(self,branch_name:str,base_branch:str)->Branch:
-        source=self.repo.get_branch(base_branch)
-        self.repo.create_git_ref(ref=f"refs/heads/{branch_name}",sha=source.commit.sha)
-        return self.repo.get_branch(branch_name)
+            base_ref = repo.get_branch(base_branch)
+            repo.create_git_ref(ref=f"refs/heads/{branch_name}", sha=base_ref.commit.sha)
+            return base_ref.commit.sha
 
-    def get_open_pr(self,branch_name:str)->Optional[PullRequest]:
-        pulls=self.repo.get_pulls(state="open",head=branch_name)
-        return pulls[0] if pulls.totalCount>0 else None
-
-    def create_pr(self,head_branch:str,base_branch:str,title:str,body:str)->PullRequest:
-        return self.repo.create_pull(title=title,body=body,head=head_branch,base=base_branch)
-
-    def update_pr(self,pr:PullRequest,title:str,body:str):
-        pr.edit(title=title,body=body)
-
-    def upsert_file(self,branch_name:str,path:str,content:str,message:str):
+    @staticmethod
+    def _upsert_file(repo: Repository, branch: str, path: str, content: str, message: str) -> str:
         content_bytes = content.encode("utf-8")
         try:
-            existing = self.repo.get_contents(path, ref=branch_name)
+            existing = repo.get_contents(path, ref=branch)
             if isinstance(existing, list):
                 existing = existing[0]
-            self.repo.update_file(
+            commit = repo.update_file(
                 path=path,
                 message=message,
                 content=content_bytes,
                 sha=existing.sha,
-                branch=branch_name
+                branch=branch,
             )
+            return commit["commit"].sha
         except GithubException as e:
             if 404 in e.args:
-                self.repo.create_file(
+                commit = repo.create_file(
                     path=path,
                     message=message,
                     content=content_bytes,
-                    branch=branch_name
+                    branch=branch,
                 )
-            else:
-                raise e
-            
-    def create_empty_commit(self,branch_name):
-        branch=self.get_branch(branch_name=branch_name)
-        latest_commit = branch.commit
-        tree = latest_commit.commit.tree
+                return commit["commit"].sha
+            raise e
 
-        new_commit=self.repo.create_git_commit(
-            message="chore:empty commit to enable PR",
-            tree=tree,
-            parents=[latest_commit.commit]
+    @staticmethod
+    def _ensure_pr(
+        repo: Repository,
+        repo_owner: str,
+        head_branch: str,
+        base_branch: str,
+        pr_title: str,
+        pr_description: str,
+    ) -> PullRequest:
+        head_ref = f"{repo_owner}:{head_branch}"
+        pulls = repo.get_pulls(state="open", head=head_ref, base=base_branch)
+        if pulls.totalCount > 0:
+            pr = pulls[0]
+            pr.edit(title=pr_title, body=pr_description)
+            return pr
+        return repo.create_pull(
+            title=pr_title,
+            body=pr_description,
+            head=head_branch,
+            base=base_branch,
         )
-        ref=self.repo.get_git_ref(f"heads/{branch_name}")
-        ref.edit(sha=new_commit.sha)
-
-class PRPipeline:
-    def __init__(self,token:str,repo_name:str,base_branch:str="main"):
-        self.client=GitHubClient(token,repo_name)
-        self.base_branch=base_branch
-
-    def step1_check_resources(self,branch_name:str):
-        branch=self.client.get_branch(branch_name=branch_name)
-        if not branch:
-            self.client.create_branch(branch_name=branch_name,base_branch=self.base_branch)
-        existing_pr=self.client.get_open_pr(branch_name=branch_name)
-        return existing_pr
-
-    def step2_ensure_pr(self,branch_name:str,pr_title:str,pr_body:str,
-                        existing_pr:Optional[PullRequest]):
-        try:
-            if existing_pr:
-                self.client.update_pr(existing_pr,pr_title,pr_body)
-                return existing_pr
-            else:
-                return self.client.create_pr(
-                    head_branch=branch_name,
-                    base_branch=self.base_branch,
-                    title=pr_title,
-                    body=pr_body
-                )
-        except GithubException as e:
-            if "No commits between" in str(e):
-                self.client.create_empty_commit(branch_name=branch_name)
-                return self.client.create_pr(
-                    head_branch=branch_name,
-                    base_branch=self.base_branch,
-                    title=pr_title,
-                    body=pr_body
-                )
-            else:
-                print(e)
-                traceback.print_exc()
-
-    def step3_commit_single_file(self, branch_name: str, path: str, content: str):
-        msg = f"docs: update {path}"
-        try:
-            self.client.upsert_file(branch_name, path, content, msg)
-        except Exception as e:
-            traceback.print_exc()
-            raise e
-
-
-class GithubPRTool():
-    
-    @tool("upload_pr")
-    def upload_pr_for_repo(github_token:str,repo:str,base_branch:str,branch_name:str,path:str,content:str,pr_title:str,pr_body:str)->Optional[PullRequest]:
-        """Based on the relevant parameters required for the PR, submit the PR to the corresponding branch of the repository."""
-        proxy_backup={
-            "http_proxy":"http://proxy-dmz.intel.com:912",
-            "https_proxy":"http://proxy-dmz.intel.com:912"
-        }
-        try:
-            proxy_backup=restore_proxy_in_process(proxy_backup=proxy_backup)
-            pipeline=PRPipeline(github_token,repo,base_branch)
-            existing_pr=pipeline.step1_check_resources(branch_name)
-            final_pr=pipeline.step2_ensure_pr(branch_name,pr_title,pr_body,existing_pr)
-            pipeline.step3_commit_single_file(branch_name, path, content) 
-            return final_pr
-        except Exception as e:
-            traceback.print_exc()
-            raise e
-        finally:
-            proxy_backup=clear_proxy_in_process(proxy_backup=proxy_backup)
-        
-    @tool("validate_pr")
-    def validate_pr_exists_for_repo(github_token:str,repo:str,branch_name:str):
-        """Verify whether the PR for the corresponding repository branch exists based on the relevant parameters required for the PR."""
-        proxy_backup={
-            "http_proxy":"http://proxy-dmz.intel.com:912",
-            "https_proxy":"http://proxy-dmz.intel.com:912"
-        }
-        try:
-            proxy_backup=restore_proxy_in_process(proxy_backup=proxy_backup)
-            client=GitHubClient(github_token,repo)
-            pr=client.get_open_pr(branch_name=branch_name)
-            return pr is not None,pr
-        except Exception as e:
-            return False,None
-        finally:
-            proxy_backup=clear_proxy_in_process(proxy_backup=proxy_backup)
 
     @tool("get_github_config")
     def get_github_config():
-        """Retrieve GITHUB_CONFIG from GLOBAL_MEMORY.
-        Returns: dictionary containing github_token, repo_owner, repo_name, base_branch, head_branch, pr_title, pr_description, commit_message, path."""
-        memory=GlobalMemory()
-        return memory.memory_retrieve("github_config") or {}
-    
-    @tool("get_merged_readme")
-    def get_merged_readme():
-        """Retrieve merged_readme from GLOBAL_MEMORY.
-        Returns: merged README content string."""
-        memory=GlobalMemory()
-        return memory.memory_retrieve("merged_readme") or ""
-    
+        """Retrieve GITHUB_CONFIG from GLOBAL_MEMORY."""
+        return GithubPRTool._read_github_config()
+
+    @tool("get_publish_context")
+    def get_publish_context() -> Dict[str, Any]:
+        """Get publish context including github_config and final publish content from memory."""
+        artifacts = GithubPRTool._read_publish_artifacts()
+        return {
+            "github_config": GithubPRTool._read_github_config(),
+            "family_md": artifacts["family_md"],
+            "family_index_js": artifacts["family_index_js"],
+        }
+
+    @tool("validate_publish_context")
+    def validate_publish_context(github_config: Dict[str, Any]) -> Dict[str, Any]:
+        """Validate repo/branch/pr context before publishing."""
+        proxy_backup = GithubPRTool._proxy_restore()
+        try:
+            repo_info = _resolve_repo(github_config)
+            repo_owner = repo_info["repo_owner"]
+            repo_name = repo_info["repo_name"]
+            token = (
+                (github_config.get("github_token") or "").strip()
+                or os.getenv("README_GENERATOR_GITHUB_TOKEN", "").strip()
+                or os.getenv("GITHUB_TOKEN", "").strip()
+                or os.getenv("GH_TOKEN", "").strip()
+            )
+            base_branch = github_config.get("base_branch", "main").strip()
+            head_branch = github_config.get("head_branch", "dev").strip()
+
+            required_missing = []
+            if not token:
+                required_missing.append("github_token")
+            if not repo_owner:
+                required_missing.append("repo_owner")
+            if not repo_name:
+                required_missing.append("repo_name")
+            if not base_branch:
+                required_missing.append("base_branch")
+            if not head_branch:
+                required_missing.append("head_branch")
+            has_legacy_path = bool((github_config.get("md_path") or github_config.get("path") or "").strip())
+            has_publish_items = isinstance(github_config.get("publish_items") or github_config.get("files") or github_config.get("upload_files"), list)
+            if not has_legacy_path and not has_publish_items:
+                required_missing.append("path/md_path or publish_items/files/upload_files")
+            if required_missing:
+                return {"ok": False, "missing": required_missing}
+
+            gh = Github(token)
+            repo = gh.get_repo(f"{repo_owner}/{repo_name}")
+            repo.get_branch(base_branch)
+            return {"ok": True, "repo": f"{repo_owner}/{repo_name}"}
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+        finally:
+            GithubPRTool._proxy_clear(proxy_backup)
+
+    @tool("publish_family_artifacts")
+    def publish_family_artifacts(github_config: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        """Publish family README.md + index.js and create/update PR."""
+        proxy_backup = GithubPRTool._proxy_restore()
+        try:
+            cfg = github_config or GithubPRTool._read_github_config()
+            artifacts = GithubPRTool._read_publish_artifacts()
+            if not artifacts["family_md"] or not artifacts["family_index_js"]:
+                raise ValueError("family_md and family_index_js are required before PR publish.")
+
+            targets = GithubPRTool._resolve_publish_targets(cfg, artifacts)
+            repo_info = _resolve_repo(cfg)
+            repo_owner = repo_info["repo_owner"]
+            repo_name = repo_info["repo_name"]
+            token = (
+                (cfg.get("github_token") or "").strip()
+                or os.getenv("README_GENERATOR_GITHUB_TOKEN", "").strip()
+                or os.getenv("GITHUB_TOKEN", "").strip()
+                or os.getenv("GH_TOKEN", "").strip()
+            )
+            base_branch = (cfg.get("base_branch") or "main").strip()
+            head_branch = (cfg.get("head_branch") or "dev").strip()
+            pr_title = (cfg.get("pr_title") or "docs: update family README").strip()
+            pr_description = (cfg.get("pr_description") or "").strip()
+            commit_message = (cfg.get("commit_message") or "docs: update family README and index").strip()
+
+            if not token:
+                raise ValueError("github_token is required")
+            if not repo_owner or not repo_name:
+                raise ValueError("repo_owner and repo_name are required")
+
+            gh = Github(token)
+            repo = gh.get_repo(f"{repo_owner}/{repo_name}")
+            GithubPRTool._ensure_branch(repo, head_branch, base_branch)
+
+            file_commits: List[Dict[str, str]] = []
+            for item in targets:
+                p = str(item["path"]).strip()
+                c = str(item["content"])
+                label = str(item.get("label") or p)
+                sha = GithubPRTool._upsert_file(
+                    repo=repo,
+                    branch=head_branch,
+                    path=p,
+                    content=c,
+                    message=f"{commit_message} ({label})",
+                )
+                file_commits.append({"path": p, "label": label, "commit_sha": sha})
+
+            pr = GithubPRTool._ensure_pr(
+                repo=repo,
+                repo_owner=repo_owner,
+                head_branch=head_branch,
+                base_branch=base_branch,
+                pr_title=pr_title,
+                pr_description=pr_description,
+            )
+            pr_info = {"number": pr.number, "url": pr.html_url, "status": "open"}
+            GithubPRTool.global_memory.memory_store("pr_info", pr_info)
+            return {
+                "ok": True,
+                "pr": pr_info,
+                "files": file_commits,
+                # Backward compatible fields for current md/js usage.
+                "md_path": next((x["path"] for x in file_commits if x["label"] == "README.md"), ""),
+                "js_path": next((x["path"] for x in file_commits if x["label"] == "index.js"), ""),
+                "md_commit_sha": next((x["commit_sha"] for x in file_commits if x["label"] == "README.md"), ""),
+                "js_commit_sha": next((x["commit_sha"] for x in file_commits if x["label"] == "index.js"), ""),
+            }
+        except Exception as e:
+            traceback.print_exc()
+            return {"ok": False, "error": str(e)}
+        finally:
+            GithubPRTool._proxy_clear(proxy_backup)
+
     @tool("memory_store_pr_info")
-    def memory_store_pr_info(pr_num,url,status):
-        """Store PR information into GLOBAL_MEMORY.
-        Inputs: PR number, PR URL, PR status
-        Returns: success message."""
-        memory=GlobalMemory()
-        memory.memory_store("pr_info",{
-            "number":pr_num,
-            "url":url,
-            "status":status
-        })
-        
-        
-            
-            
-    
+    def memory_store_pr_info(pr_num, url, status):
+        """Store PR information into GLOBAL_MEMORY."""
+        GithubPRTool.global_memory.memory_store(
+            "pr_info",
+            {
+                "number": pr_num,
+                "url": url,
+                "status": status,
+            },
+        )
+        return True

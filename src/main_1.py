@@ -9,7 +9,6 @@ from readme_generator.crews.input_parser_crew import InputParserCrew
 from readme_generator.crews.github_pr_crew import GithubPRCrew
 from readme_generator.crews.model_search_crew import ModelSearchCrew
 from readme_generator.crews.readme_generate_crew import ReadmeGeneratorCrew
-from readme_generator.crews.readme_merger_crew import ReadmeMergerCrew
 from readme_generator.crews.remote_execution_crew import RemoteExecutionCrew
 
 app=FastAPI()
@@ -31,15 +30,13 @@ input_parser=InputParserCrew()
 model_searcher=ModelSearchCrew()
 readme_generator=ReadmeGeneratorCrew()
 remote_executor=RemoteExecutionCrew()
-readme_merger=ReadmeMergerCrew()
 github_pr=GithubPRCrew()
 
-Agent_list=[model_searcher,readme_generator,remote_executor,readme_merger,github_pr]
+Agent_list=[model_searcher,readme_generator,remote_executor,github_pr]
 Agent_name=[
     "ModelSearchCrew",
     "ReadmeGeneratorCrew",
     "RemoteExecutionCrew",
-    "ReadmeMergerCrew",
     "GithubPRCrew",
 ]
 

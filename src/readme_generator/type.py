@@ -9,7 +9,6 @@ from pydantic import BaseModel
 from crews.model_search_crew import ModelSearchCrew
 from crews.readme_generate_crew import ReadmeGeneratorCrew
 from crews.remote_execution_crew import RemoteExecutionCrew
-from crews.readme_merger_crew import ReadmeMergerCrew
 from crews.github_pr_crew import GithubPRCrew
 from crews.input_parser_crew import InputParserCrew
 from tools.memory_tool import GlobalMemory
@@ -54,7 +53,6 @@ class ModelWorkflowState(BaseModel):
     model_id_list:List[str]=[]
     model_url_list:List[str]=[]
     model_readme_list:List[str]=[]
-    merged_readme:str=""
     reference_example_list:List[str]=[]
     origin_reference_example_list:List[str]=[]
     merged_reference_example:str=""
@@ -142,21 +140,9 @@ class ModelWorkflowFlow(Flow[ModelWorkflowState]):
                 elif chunk.chunk_type=="tool_use":
                     print(f"\n[工具调用]{chunk.tool_name}:{chunk.tool_input}")
         self.state.all_test_completed=True
-        confirm_continue("是否合并 README？")
+        confirm_continue("是否提交PR？")
 
     @listen(run_remote_execution)
-    def run_readme_merge(self):
-        print("\n启动README合并智能体")
-        if not confirm_skip("是否跳过README合并？"):
-            streaming_output=ReadmeMergerCrew().crew().kickoff()
-            for chunk in streaming_output:
-                if chunk.chunk_type=="text":
-                    print(f"[{chunk.agent.role}]{chunk.content}",end="")
-                elif chunk.chunk_type=="tool_use":
-                    print(f"\n[工具调用]{chunk.tool_name}:{chunk.tool_input}")
-        confirm_continue("是否提交PR")
-
-    @listen(run_readme_merge)
     def github_pr(self):
         print("\n提交github pr")
         if not confirm_skip("是否跳过提交github pr？"):

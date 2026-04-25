@@ -11,7 +11,6 @@ from .crews.github_pr_crew import GithubPRCrew
 from .crews.input_parser_crew import InputParserCrew
 from .crews.model_search_crew import ModelSearchCrew
 from .crews.readme_generate_crew import ReadmeGeneratorCrew
-from .crews.readme_merger_crew import ReadmeMergerCrew
 from .crews.remote_execution_crew import RemoteExecutionCrew
 from .tools.memory_tool import GlobalMemory
 
@@ -22,7 +21,6 @@ DEFAULT_STAGE_ORDER = [
     "model_search",
     "readme_generation",
     "remote_execution",
-    "readme_merge",
     "github_pr",
 ]
 
@@ -67,7 +65,28 @@ class WorkflowState(BaseModel):
 
 def build_legacy_workflow_input() -> WorkflowInput:
     """Legacy preset data from the original runnable script."""
+    other_github={
+        "github_config": {
+            "repo_owner": "YuChangrui578",
+            "repo_name": "readme_example",
+            "base_branch": "main",
+            "head_branch": "dev",
+            "pr_title": "update docs bundle",
+            "pr_description": "multi-file publish",
+            "commit_message": "docs: batch publish",
+            "publish_items": [
+                { "path": "Xeon/Llama/README.md", "content_key": "family_md" },
+                { "path": "Xeon/Llama/index.js", "content_key": "family_index_js" },
+                { "path": "Xeon/Common/extra.txt", "content": "custom text content" }
+            ]
+        }
+    }
     return WorkflowInput(
+        input_text=(
+            '{"model_list": ["Llama-3.2-3B-quantized.w8a8", "Llama-3.2-3B-Instruct-FP8", '
+            '"Llama-3.2-3B-Instruct-AWQ"], '
+            '"github_url": ["", "", "https://github.com/jianan-gu/sglang/tree/cpu_optimized"]}'
+        ),
         model_list=[
             "Llama-3.2-3B-quantized.w8a8",
             "Llama-3.2-3B-Instruct-FP8",
@@ -115,7 +134,6 @@ class ReadmeWorkflowCrew(Flow[WorkflowState]):
         "model_search": ModelSearchCrew,
         "readme_generation": ReadmeGeneratorCrew,
         "remote_execution": RemoteExecutionCrew,
-        "readme_merge": ReadmeMergerCrew,
         "github_pr": GithubPRCrew,
     }
 
@@ -142,6 +160,17 @@ class ReadmeWorkflowCrew(Flow[WorkflowState]):
 
     def _prepare_memory(self) -> None:
         cfg = self.workflow_input
+
+        if not cfg.input_text and (cfg.model_list or cfg.github_url):
+            cfg.input_text = (
+                "WorkflowInput JSON:\n"
+                + str(
+                    {
+                        "model_list": cfg.model_list or [],
+                        "github_url": cfg.github_url or [],
+                    }
+                )
+            )
 
         ref_md = cfg.ref_md
         ref_index_js = cfg.ref_index_js
@@ -173,14 +202,39 @@ class ReadmeWorkflowCrew(Flow[WorkflowState]):
     def _run_stage(self, stage_name: str) -> Dict[str, Any]:
         print(f"\n=== Running stage: {stage_name} ===")
         crew_cls = self._crew_map[stage_name]
-        output = crew_cls(global_memory=self.global_memory).crew().kickoff()
+        try:
+            crew_instance = crew_cls(global_memory=self.global_memory)
+        except TypeError as e:
+            # Keep compatibility with crews that still use no-arg constructors.
+            if "unexpected keyword argument 'global_memory'" in str(e) or "takes no arguments" in str(e):
+                crew_instance = crew_cls()
+            else:
+                raise
+        output = crew_instance.crew().kickoff()
         final_output = self._consume_stage_output(output)
         print(f"=== Finished stage: {stage_name} ===")
         return {"stage": stage_name, "final_output": final_output, "skipped": False}
 
+    @staticmethod
+    def _normalize_stream_text(text: str) -> str:
+        raw = str(text or "")
+        if not raw:
+            return raw
+        lines = [ln.strip() for ln in raw.splitlines() if ln.strip()]
+        if len(lines) < 6:
+            return raw.strip()
+        short_lines = [ln for ln in lines if len(ln) <= 20]
+        # If stream is fragmented into many short lines (token/word-level), join them.
+        if len(short_lines) >= int(len(lines) * 0.75):
+            joined = " ".join(lines)
+            joined = " ".join(joined.split())
+            return joined.strip()
+        return raw.strip()
+
     def _consume_stage_output(self, output: Any) -> str:
         if isinstance(output, (str, bytes)):
-            return output.decode() if isinstance(output, bytes) else output
+            text = output.decode() if isinstance(output, bytes) else output
+            return self._normalize_stream_text(text)
 
         if hasattr(output, "final_output"):
             return str(output.final_output)
@@ -206,7 +260,7 @@ class ReadmeWorkflowCrew(Flow[WorkflowState]):
                     text = str(chunk)
                     print(text)
                     event_collected.append(text)
-            merged_text = "".join(text_collected).strip()
+            merged_text = self._normalize_stream_text("".join(text_collected).strip())
             if merged_text:
                 print(f"[{last_agent}] {merged_text}")
             print()
@@ -250,10 +304,6 @@ class ReadmeWorkflowCrew(Flow[WorkflowState]):
         return self._run_or_skip("remote_execution")
 
     @listen(run_remote_execution)
-    def run_readme_merge(self):
-        return self._run_or_skip("readme_merge")
-
-    @listen(run_readme_merge)
     def run_github_pr(self):
         return self._run_or_skip("github_pr")
 
