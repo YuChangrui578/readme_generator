@@ -16,13 +16,33 @@ adaptive_readme_generation_task:
     - Use family_md/family_index_js as template references (fallback to legacy ref_md/ref_index_js) and adapt to current model_list/model_id_list.
     - Preserve official/dev distinctions implied by github_url/remote_payload metadata.
     2) url_source mode (generation_mode in web_sources/github_folders/url_source):
-    - Treat source/ref artifacts as upstream official cookbook context.
+    - Treat source/ref artifacts as upstream official cookbook context from
+      https://github.com/sgl-project/sglang/tree/main/docs_new/cookbook/autoregressive.
+    - In this source tree, pages are grouped by model publishing organizations.
+    - Each .mdx file represents one model series and imports a corresponding .jsx file used as embedded tables in generated HTML pages.
     - Keep official structure/style, and add Intel CPU content in the same structure.
     - Do not inject dev-branch-only behavior.
     For url_source mode, generate Intel CPU content that coexists in the same structure:
     - Preserve existing CUDA/AMD sections and conventions.
+    - Locate the target .jsx source file using the import line in each .mdx source file (for example: import { Gemma4Deployment } from '/src/snippets/autoregressive/gemma4-deployment.jsx';).
+    - Apply updates to that imported .jsx table/config source, not only to markdown text.
+    - Where only NVIDIA/AMD GPU SKUs are described, add specific Intel Xeon CPU descriptions in parallel.
     - Add Intel CPU as a first-class parallel option in text, tables, command examples, and index.js selectors.
+    - Ensure the .mdx narrative and imported .jsx table content stay aligned when CPU rows/columns are introduced.
+    - In .jsx hardware list, add: { id: 'xeon', label: 'XEON', default: false }.
+    - If Xeon-supported models require additional quantization types, add them to quantization options (for example: { id: 'int8', label: 'INT8', default: false }).
+    - Encode Xeon capability rules in table/config logic:
+      Xeon supports TP only; Xeon does not support DP/EP/MTP.
+      Xeon supports Instruct/Thinking and tool call parser.
+      Xeon does not support speculative decoding or Mamba radix cache.
+    - Enforce capability checks so unsupported combinations above are unselectable in generated tabs/options.
+    - Restore the selected configs to default when switching between hardware options to avoid invalid combinations.
+    - In generateCommand, determine modelPath from the selected/input model_id.
+    - In generateCommand, set --tp 6, --disable-overlap-schedule and --device cpu when hardware is xeon.
+    - In generateCommand, add --quantization w8a8_int8 when Xeon uses INT8 quantization.
     - Add Intel CPU specific parameters when needed (for example CPU device selection, quantization flags, TP/NUMA hints).
+    - In 3. Model Deployment, ensure the following sentence is included under Configuration Tips or Advanced Usage:
+      For configuring CPU service, please refer to the `Notes` part in the serving engine launching section in [the SGLang CPU server document](https://docs.sglang.io/docs/hardware-platforms/cpu_server#launch-of-the-serving-engine) to better understand how to configure the arguments, especially for TP (tensor parallel) and NUMA binding settings.
     - Keep naming/style aligned with existing source files.
     If you further refine content after the first generation call:
     - If source_js_files contains multiple files, store with memory_store_family_multi_artifacts(family_md, family_js_files_json).

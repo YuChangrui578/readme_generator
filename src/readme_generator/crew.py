@@ -42,15 +42,15 @@ def load_reference_files(folder_path: str, recursive: bool = False) -> Dict[str,
     if not folder.exists():
         raise FileNotFoundError(f"Folder does not exist: {folder_path}")
 
-    md_pattern = "**/*.md" if recursive else "*.md"
-    js_pattern = "**/*.js" if recursive else "*.js"
-    md_files = sorted([p for p in folder.glob(md_pattern) if p.suffix.lower() in [".md", ".markdown"]], key=lambda p: str(p))
-    js_files = sorted([p for p in folder.glob(js_pattern) if p.suffix.lower() == ".js"], key=lambda p: str(p))
+    md_pattern = "**/*.mdx" if recursive else "*.mdx"
+    js_pattern = "**/*.jsx" if recursive else "*.jsx"
+    md_files = sorted([p for p in folder.glob(md_pattern) if p.suffix.lower() in [".mdx"]], key=lambda p: str(p))
+    js_files = sorted([p for p in folder.glob(js_pattern) if p.suffix.lower() == ".jsx"], key=lambda p: str(p))
     md_path = next(
-        (p for p in md_files if p.name.lower() in {"readme.md", "reference.md"}),
+        (p for p in md_files if p.name.lower() in {"readme.mdx", "reference.mdx"}),
         md_files[0] if md_files else None,
     )
-    js_path = next((p for p in js_files if p.name == "index.js"), js_files[0] if js_files else None)
+    js_path = next((p for p in js_files if p.name == "index.jsx"), js_files[0] if js_files else None)
     return {
         "ref_md": md_path.read_text(encoding="utf-8") if md_path else "",
         "ref_index_js": js_path.read_text(encoding="utf-8") if js_path else "",
@@ -411,14 +411,11 @@ def build_source_url_workflow_input() -> WorkflowInput:
     return WorkflowInput(
         memory_profile="url_source",
         generation_mode="web_sources",
-        source_md_url="https://github.com/sgl-project/sgl-cookbook/blob/main/docs/autoregressive/Qwen/Qwen3.md",
-        source_js_url="https://github.com/sgl-project/sgl-cookbook/blob/main/src/components/autoregressive/Qwen3ConfigGenerator/",
+        source_md_url="https://github.com/sgl-project/sglang/blob/main/docs_new/cookbook/autoregressive/Qwen/Qwen3.mdx",
+
         input_text=(
-            "请基于下面两个来源做 Qwen3 的文档增强：README 来源是 "
-            "https://github.com/sgl-project/sgl-cookbook/blob/main/docs/autoregressive/Qwen/Qwen3.md ，"
-            "JS 来源是 "
-            "https://github.com/sgl-project/sgl-cookbook/blob/main/src/components/autoregressive/Qwen3ConfigGenerator/ 。"
-            "这次只考虑官方 sglang 的安装和启动方式，不要使用 dev branch。"
+            "请基于下面的.mdx文件做 Qwen3 的文档增强："
+            "https://github.com/sgl-project/sglang/blob/main/docs_new/cookbook/autoregressive/Qwen/Qwen3.mdx ，"
             "请先从这些文件内容里推断模型列表，再继续后续流程。"
         ),
         model_list=[],

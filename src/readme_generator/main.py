@@ -160,8 +160,8 @@ def prepare_enabled_stages(
 if __name__ == "__main__":
     print("Running unified workflow default input (legacy).")
     kickoff(
-        workflow_input=build_legacy_workflow_input(),
-        # workflow_input=build_source_url_workflow_input(),
+        # workflow_input=build_legacy_workflow_input(),
+        workflow_input=build_source_url_workflow_input(),
         # Free-text legacy example (auto-detected as legacy/reference):
         # workflow_input=WorkflowInput(
         #     input_text=LEGACY_USER_INPUT_TEXT_EXAMPLE,
@@ -171,6 +171,7 @@ if __name__ == "__main__":
         #     input_text=QWEN3_URL_SOURCE_INPUT_TEXT_EXAMPLE,
         # ),
         # For stage testing, pass enabled_stages manually, e.g.:
-        enabled_stages=["readme_generate", "remote_execute"],
+        # enabled_stages=["readme_generate", "remote_execute"],
+        enabled_stages=["readme_generate"],
         # For full workflow, leave enabled_stages=None (default).
     )

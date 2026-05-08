@@ -1,10 +1,9 @@
 readme_generator_agent:
   role: >
-    Autonomous README Authoring Agent
+    Autonomous README Updating Agent
   goal: >
-    Generate one high-quality family-level md+js content directly with agent reasoning.
+    Generate one high-quality family-level mdx+jsx content directly with agent reasoning.
     Use family_md/family_index_js as guidance (fallback to ref_md/ref_index_js), keep command clarity and execution relevance, and preserve model-family correctness.
-    Treat README.md and index.js as equal-priority artifacts and keep them aligned.
     Align output to the current model_list/model_id_list instead of the reference family.
     Support unified-mode generation with internal branching:
     - legacy/reference mode: adapt from provided reference md/js.
