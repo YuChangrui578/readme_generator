@@ -8,6 +8,8 @@ from .common_utils import infer_family_hint_from_corpus, is_url_source_mode, nor
 
 class GenerateReadmeTool:
     global_memory = None
+    # Transient pipeline state passed between step_* tools (not persisted to GlobalMemory).
+    _pipeline: Dict[str, Any] = {}
     llm = LLM_Callable(
         base_url="http://10.54.34.78:30000/v1",
         api_key="empty",
@@ -88,6 +90,57 @@ class GenerateReadmeTool:
             raise ValueError("Generated artifacts do not align with input model_list/model_id_list.")
 
     @staticmethod
+    def _fix_md_component_references(md: str) -> str:
+        """Replace <!-- 组件引用：ComponentName --> comments with proper MDX import + <Component /> usage.
+
+        Docusaurus MDX requires import statements at the top of the file (before the first
+        heading / content) and the component tag at the point of usage.
+        """
+        comment_pat = re.compile(r"<!--\s*组件引用[：:]\s*(\w+)\s*-->")
+        refs = list(dict.fromkeys(comment_pat.findall(md)))  # unique, preserve order
+        if not refs:
+            return md
+
+        # Replace each comment placeholder with the JSX self-closing tag.
+        md = comment_pat.sub(lambda m: f"<{m.group(1)} />", md)
+
+        # Collect import statements that are missing.
+        missing_imports: List[str] = []
+        for comp in refs:
+            import_stmt = f"import {comp} from '@site/src/components/autoregressive/{comp}';"
+            # Also allow double-quote variant already present.
+            if import_stmt not in md and f'import {comp} from "@site/src/components/autoregressive/{comp}"' not in md:
+                missing_imports.append(import_stmt)
+
+        if missing_imports:
+            imports_block = "\n".join(missing_imports) + "\n\n"
+            # Place after YAML front matter (---) block if present, otherwise at the very top.
+            if md.lstrip().startswith("---"):
+                fm_start = md.index("---")
+                fm_end = md.find("---", fm_start + 3)
+                if fm_end != -1:
+                    insert_at = fm_end + 3
+                    while insert_at < len(md) and md[insert_at] in "\n\r":
+                        insert_at += 1
+                    md = md[:insert_at] + "\n\n" + imports_block + md[insert_at:]
+                else:
+                    md = imports_block + md
+            else:
+                md = imports_block + md
+
+        return md
+
+    @staticmethod
+    def _fix_unclosed_tags(text: str) -> str:
+        """Fix HTML/JSX closing tags that are missing their closing `>`.
+
+        The LLM occasionally emits `</div` or `</span` (etc.) without the trailing `>`,
+        which breaks JSX rendering. The `\\b` word boundary anchors the match to the full
+        tag name, preventing backtracking into valid tags like `</small>`.
+        """
+        return re.sub(r'</([A-Za-z][A-Za-z0-9]*)\b(?!>)', r'</\1>', text)
+
+    @staticmethod
     def _strip_think_blocks(text: str) -> str:
         s = str(text or "")
         start_tag = "<think>"
@@ -145,19 +198,108 @@ class GenerateReadmeTool:
         if model_list and not any(m.lower() in family_md.lower() for m in model_list):
             lines = [f"- {m}" for m in model_list]
             family_md = f"## Target Models\n\n{chr(10).join(lines)}\n\n{family_md}".strip()
-        if is_url_source_mode(mode) and "intel" not in family_md.lower():
-            family_md += "\n\n## Intel CPU\n\nAdd Intel CPU launch options aligned with CUDA/AMD structure.\n"
 
-        if not family_index_js.strip():
+        if is_url_source_mode(mode) and not ("intel" in family_md.lower() and "xeon" in family_md.lower()):
+            # Try LLM-based unified rewrite first; fall back to minimal hardcoded sections.
+            example_model = next(
+                (m for m in model_list if "instruct" in m.lower() and "8b" in m.lower()
+                 and "fp8" not in m.lower() and "w8a8" not in m.lower()),
+                model_list[0] if model_list else "meta-llama/Llama-3.1-8B-Instruct",
+            )
+            llm_unified = None
+            try:
+                unified_prompt = f"""You are a technical documentation writer for LLM serving infrastructure.
+
+Rewrite the README and index.js below so that CUDA, AMD, and Intel CPU (Xeon) are all
+first-class peers at the same structural level inside ONE unified document each.
+Do NOT simply append Intel content — restructure each section to cover all three backends
+in parallel.
+
+### Source family_md (CUDA/AMD only — restructure):
+{GenerateReadmeTool._shrink_reference_text(family_md, head_chars=3000, tail_chars=800)}
+
+### Source family_index_js:
+{GenerateReadmeTool._shrink_reference_text(family_index_js, head_chars=2000, tail_chars=500)}
+
+### Target models:
+{json.dumps(model_list, ensure_ascii=False)}
+### Example model: {example_model}
+
+Intel Xeon: use `--device cpu`; single-socket `--tp 1`; dual-socket `--tp 2`.
+Add `intelCpuBackend` object in JS mirroring existing backend style.
+
+Output ONLY valid JSON (no fences):
+{{"family_md": "<unified README>", "family_index_js": "<unified index.js>"}}"""
+                response = GenerateReadmeTool.llm.invoke(unified_prompt)
+                cleaned = GenerateReadmeTool._strip_think_blocks(response)
+                cleaned_lower = cleaned.lstrip().lower()
+                if not (cleaned_lower.startswith("<!doctype") or cleaned_lower.startswith("<html")):
+                    parsed = json.loads(cleaned)
+                    nm = str(parsed.get("family_md") or "").strip()
+                    nj = str(parsed.get("family_index_js") or "").strip()
+                    if nm and nj:
+                        llm_unified = (nm, nj)
+            except Exception as e:
+                print(f"[fallback][llm_unify_failed] {e}")
+
+            if llm_unified:
+                family_md, family_index_js = llm_unified
+            else:
+                # Minimal hardcoded Intel section as last resort.
+                intel_section = f"""## Intel CPU (Xeon) Deployment
+
+SGLang supports running these models on Intel Xeon CPUs via the `--device cpu` flag.
+
+### Launch Server (Single Socket)
+
+```bash
+python -m sglang.launch_server \\
+  --model-path {example_model} \\
+  --host 0.0.0.0 \\
+  --tp 1 \\
+  --device cpu
+```
+
+### Launch Server (Dual-Socket / Higher Throughput)
+
+```bash
+python -m sglang.launch_server \\
+  --model-path {example_model} \\
+  --host 0.0.0.0 \\
+  --tp 2 \\
+  --device cpu
+```
+
+### Benchmark (Intel Xeon CPU)
+
+```bash
+python -m sglang.bench_serving \\
+  --dataset-name random \\
+  --random-input-len 1024 \\
+  --random-output-len 1024 \\
+  --num-prompts 1 \\
+  --max-concurrency 1 \\
+  --request-rate inf
+```""".strip()
+                family_md = f"{family_md.rstrip()}\n\n{intel_section}\n"
+                if "intel" not in family_index_js.lower():
+                    family_index_js += (
+                        "\n\n// Intel CPU (Xeon) backend\n"
+                        "export const intelCpuBackend = {\n"
+                        "  device: 'cpu',\n"
+                        "  tpSizes: [1, 2, 4],\n"
+                        f"  exampleModel: '{example_model}',\n"
+                        "};\n"
+                    )
+        elif not family_index_js.strip():
             model_js = ", ".join([f'"{m}"' for m in model_list]) if model_list else ""
             family_index_js = (
                 "export const modelList = ["
                 + model_js
                 + "];\n"
                 + "export const backends = ['cuda', 'amd', 'intel_cpu'];\n"
+                + "export const intelCpuBackend = { device: 'cpu', tpSizes: [1, 2, 4] };\n"
             )
-        elif is_url_source_mode(mode) and "intel" not in family_index_js.lower():
-            family_index_js += "\n\n// Intel CPU backend option\n"
 
         return {
             "family_md": family_md.strip(),
@@ -398,30 +540,544 @@ Input:
         return ("reference", "fallback")
 
     @staticmethod
-    def _llm_generate_family_artifacts(ctx: Dict[str, Any]) -> Dict[str, Any]:
-        prompt = f"""
-You are generating family-level deployment docs.
+    def _inject_intel_cpu_xeon_section(
+        family_md: str,
+        family_index_js: str,
+        model_list: List[str],
+        model_id_list: List[str],
+        mode: str,
+    ) -> tuple[str, str]:
+        """Safety-net: if the primary generation is missing Intel/Xeon content, augment via LLM
+        (MD) + code patch (JS). Only fires when Intel content is absent.
+        Falls back to hardcoded append only if the LLM call itself fails.
+        """
+        if not is_url_source_mode(mode):
+            return (family_md, family_index_js)
+
+        md = str(family_md or "")
+        js = str(family_index_js or "")
+
+        # Primary generation already produced Intel + Xeon content.
+        # Still run the JS patcher to guarantee all mechanical changes (w8a8, visibleIf, etc.).
+        target_models = (
+            GenerateReadmeTool._dedup_str_list(model_id_list or [])
+            or GenerateReadmeTool._dedup_str_list(model_list or [])
+        )
+        variant_info = GenerateReadmeTool._classify_models_by_variant(target_models)
+
+        if "intel" in md.lower() and "xeon" in md.lower():
+            js = GenerateReadmeTool._patch_js_for_intel_xeon(js, variant_info)
+            return (md, js)
+
+        print("[inject_intel_xeon] Intel/Xeon content missing — augmenting via LLM + code patch.")
+
+        intel_models = variant_info["intel_models"]
+        intel_quant_variants = variant_info["intel_quant_variants"]
+        w8a8_model = next((m for m in target_models if "w8a8" in m.lower()), "")
+        example_model = next(
+            (m for m in intel_models if "instruct" in m.lower() and "8b" in m.lower()
+             and "fp8" not in m.lower() and "w8a8" not in m.lower()),
+            intel_models[0] if intel_models else target_models[0] if target_models else "meta-llama/Llama-3.1-8B-Instruct",
+        )
+
+        # Build per-variant command examples
+        quant_pat = re.compile(
+            r"(?:[-._])(fp8|bf16|int8|int4|w8a8|w4a16|awq|gptq|quantized(?:\.[a-z0-9]+)*)",
+            flags=re.IGNORECASE,
+        )
+        cmd_examples: List[str] = []
+        seen_quants: set = set()
+        for m in intel_models:
+            qm = quant_pat.search(m)
+            if qm:
+                raw_q = qm.group(1).lower()
+                quant = raw_q.split(".", 1)[1] if raw_q.startswith("quantized.") else raw_q
+            else:
+                quant = "bf16"
+            if quant in seen_quants:
+                continue
+            seen_quants.add(quant)
+            cmd_examples.append(f"# {quant.upper()}\nsglang serve {m} --tp 1 --device cpu")
+        intel_cmd_block = "\n\n".join(cmd_examples)
+
+        prompt = f"""You are a technical documentation writer for LLM serving infrastructure.
+
+The README below covers CUDA/AMD backends only. Your task is to AUGMENT it by adding
+Intel CPU (Xeon) sections — do NOT remove or change any existing content.
+Return the COMPLETE README with Intel Xeon sections inserted in the right places,
+matching the style of the existing CUDA/AMD sections.
+
+### SOURCE family_md (keep every line; insert Intel Xeon sections alongside CUDA/AMD):
+{md}
+
+### Intel Xeon models (use EXACT IDs):
+{json.dumps(intel_models, ensure_ascii=False)}
+### Quantization variants: {json.dumps(intel_quant_variants)}
+{"### W8A8 model: " + w8a8_model if w8a8_model else ""}
+
+### Intel Xeon launch examples to include (one per quantization variant):
+{intel_cmd_block}
+
+### Also include:
+- Dual-socket variant: `sglang serve {example_model} --tp 2 --device cpu`
+- Benchmark block for Intel Xeon matching CUDA/AMD benchmark style.
+
+Output ONLY valid JSON (no markdown fences):
+{{"family_md": "<complete augmented README>"}}"""
+
+        new_md = md
+        try:
+            response = GenerateReadmeTool.llm.invoke(prompt)
+            cleaned = GenerateReadmeTool._strip_think_blocks(response)
+            cleaned_lower = cleaned.lstrip().lower()
+            if not (cleaned_lower.startswith("<!doctype") or cleaned_lower.startswith("<html")):
+                parsed = json.loads(cleaned)
+                lm = str(parsed.get("family_md") or "").strip()
+                if lm and len(lm) >= len(md) * 0.8:  # must not be shorter than 80% of source
+                    new_md = lm
+                else:
+                    raise ValueError("LLM returned truncated family_md")
+        except Exception as e:
+            print(f"[inject_intel_xeon][llm_md_failed] {e} — appending hardcoded Intel section")
+            # Hardcoded fallback for MD
+            intel_md_lines = [f"#### Xeon\n"]
+            intel_md_lines.append("Optimized for Intel Xeon Scalable processors using the `--device cpu` flag.\n")
+            for m_ex in cmd_examples:
+                header, cmd = m_ex.split("\n", 1)
+                quant_label = header.strip("# ")
+                intel_md_lines.append(f"**{quant_label} Example:**\n```shell\n{cmd}\n```\n")
+            if example_model:
+                intel_md_lines.append(
+                    f"**Dual-Socket Example:**\n```shell\nsglang serve {example_model} --tp 2 --device cpu\n```\n"
+                )
+            new_md = md.rstrip() + "\n\n" + "\n".join(intel_md_lines)
+
+        # Always apply code-level JS patch regardless of LLM outcome
+        new_js = GenerateReadmeTool._patch_js_for_intel_xeon(js, variant_info)
+        return (new_md.strip(), new_js.strip())
+
+    @staticmethod
+    def _classify_models_by_variant(model_list: List[str]) -> Dict[str, Any]:
+        """Analyse model_list and return structured information about which quantization
+        variants are present and which are suitable for Intel CPU (Xeon) deployment.
+
+        Returns a dict with:
+          - all_models: full deduplicated list
+          - intel_models: ALL models in model_list (caller supplies what Intel can serve)
+          - quant_variants: sorted list of quantization tags (e.g. ['bf16','fp8','w8a8'])
+          - intel_quant_variants: quantization tags in intel_models (same as quant_variants)
+          - model_map: dict keyed by "{size}_{category}_{quant}" -> model_id
+          - quant_hardware_map: dict keyed by quant -> {"only_on": [...]} or {"universal": True}
+            Derived by inspecting model namespace prefixes:
+              - amd/ prefix       → AMD-specific
+              - RedHatAI/ / Intel/ / intel-labs/ prefix → Intel-specific
+              - everything else   → universal (NV, AMD, Intel all get it)
+        """
+        quant_pattern = re.compile(
+            r"(?:[-._])(fp8|bf16|int8|int4|w8a8|w4a16|awq|gptq|quantized(?:\.[a-z0-9]+)*)",
+            flags=re.IGNORECASE,
+        )
+        size_pattern = re.compile(r"[-._](\d+(?:\.\d+)?[bB])(?:[-._]|$)")
+        instruct_pattern = re.compile(r"instruct", re.IGNORECASE)
+
+        # Known namespace → hardware affinity mappings
+        INTEL_PREFIXES = {"redhatai", "intel", "intel-labs", "openvino"}
+        AMD_PREFIXES = {"amd", "rocm"}
+
+        quant_variants: set = set()
+        model_map: Dict[str, str] = {}
+        # quant -> set of hardware families that have a model for it
+        quant_hardware_families: Dict[str, set] = {}
+
+        for m in model_list:
+            size_m = size_pattern.search(m)
+            size = size_m.group(1).lower() if size_m else "unknown"
+            is_instruct = bool(instruct_pattern.search(m))
+            quant_m = quant_pattern.search(m)
+            if quant_m:
+                raw_q = quant_m.group(1).lower()
+                quant = raw_q.split(".", 1)[1] if raw_q.startswith("quantized.") else raw_q
+            else:
+                quant = "bf16"
+
+            quant_variants.add(quant)
+            category = "instruct" if is_instruct else "base"
+            key = f"{size}_{category}_{quant}"
+            model_map[key] = m
+
+            # Determine hardware affinity from namespace prefix
+            namespace = m.split("/")[0].lower() if "/" in m else ""
+            if any(namespace.startswith(p) for p in INTEL_PREFIXES):
+                hw_family = "xeon"
+            elif any(namespace.startswith(p) for p in AMD_PREFIXES):
+                hw_family = "amd"
+            else:
+                hw_family = "universal"
+
+            quant_hardware_families.setdefault(quant, set()).add(hw_family)
+
+        # Derive quant_hardware_map:
+        # - If a quant has "universal" → available on all hardware (no disabledWhen needed)
+        # - If a quant has only "xeon"  → disable when hardware != 'xeon'
+        # - If a quant has only "amd"   → disable when hardware is not AMD
+        quant_hardware_map: Dict[str, Any] = {}
+        amd_hw_ids = {"mi300x", "mi325x", "mi355x"}
+        nvidia_hw_ids = {"h100", "h200", "b200", "a100", "a10", "l40"}
+        for quant, families in quant_hardware_families.items():
+            if "universal" in families:
+                quant_hardware_map[quant] = {"universal": True}
+            elif families == {"xeon"}:
+                quant_hardware_map[quant] = {
+                    "only_on": ["xeon"],
+                    "disabled_for_others": True,
+                }
+            elif families == {"amd"}:
+                quant_hardware_map[quant] = {
+                    "only_on": list(amd_hw_ids),
+                    "disabled_for_others": True,
+                }
+            else:
+                quant_hardware_map[quant] = {"universal": True}
+
+        # All models in model_list are Intel-supported (caller defines what Xeon can serve).
+        # Do NOT filter by size — if the user provides 405B in model_list, Xeon can serve it.
+        intel_models = list(model_list)
+
+        return {
+            "all_models": model_list,
+            "intel_models": intel_models,
+            "quant_variants": sorted(quant_variants),
+            "intel_quant_variants": sorted(quant_variants),
+            "model_map": model_map,
+            "quant_hardware_map": quant_hardware_map,
+        }
+
+    @staticmethod
+    def _patch_js_for_intel_xeon(js: str, variant_info: Dict[str, Any]) -> str:
+        """Programmatically patch the source index.js to add Intel Xeon support.
+
+        Changes made:
+        1. Add 'xeon' hardware item to the hardware options list (if not present).
+        2. Make quantization visibleIf also true for Intel Xeon.
+        3. Add w8a8 (and fp8 if not present) to quantization items.
+        4. Add Intel Xeon branch to generateCommand.
+        """
+        intel_models: List[str] = variant_info.get("intel_models") or []
+        intel_quant_variants: List[str] = variant_info.get("intel_quant_variants") or ["bf16"]
+        all_models: List[str] = variant_info.get("all_models") or []
+        w8a8_model = next((m for m in all_models if "w8a8" in m.lower()), "")
+        example_model = next(
+            (m for m in intel_models if "instruct" in m.lower() and "8b" in m.lower()
+             and "fp8" not in m.lower() and "w8a8" not in m.lower()),
+            intel_models[0] if intel_models else "",
+        )
+
+        # 0. Remove incorrect disabledWhen from model-size items (8b/70b/405b) that are
+        #    present in intel_models. The caller supplies the exact list — if 405B is in
+        #    the list, Xeon supports it; we must not grey it out.
+        size_pat0 = re.compile(r"[-._](\d+(?:\.\d+)?[bB])(?:[-._]|$)")
+        intel_sizes: set = set()
+        for m in intel_models:
+            sm = size_pat0.search(m)
+            if sm:
+                intel_sizes.add(sm.group(1).lower())
+
+        def _remove_disabled_when_from_size_item(m: re.Match) -> str:
+            item_str = m.group(0)
+            item_id_m = re.search(r"id:\s*'(\d+(?:\.\d+)?[bBmM])'", item_str)
+            if not item_id_m:
+                return item_str
+            item_size = item_id_m.group(1).lower()
+            if item_size in intel_sizes and "disabledWhen" in item_str:
+                # Strip disabledWhen and disabledReason from size items
+                item_str = re.sub(r",?\s*disabledWhen:\s*\([^)]*\)\s*=>[^,}]+", "", item_str)
+                item_str = re.sub(r",?\s*disabledReason:\s*'[^']*'", "", item_str)
+                item_str = re.sub(r",?\s*disabledReason:\s*\"[^\"]*\"", "", item_str)
+            return item_str
+
+        js = re.sub(r"\{\s*id:\s*'\d+(?:\.\d+)?[bBmM]'[^}]*\}", _remove_disabled_when_from_size_item, js)
+
+        # 1. Insert xeon hardware item after last AMD item
+        if "id: 'xeon'" not in js and 'id: "xeon"' not in js:
+            js = re.sub(
+                r"(\{\s*id:\s*'mi355x'[^}]*\})",
+                r"\1,\n          { id: 'xeon', label: 'Xeon', default: false, backend: 'intel' }",
+                js,
+            )
+
+        # 2. Make quantization always visible (remove hardware restrictions in visibleIf).
+        #    The old logic only showed quantization for 405B or AMD, missing NV+Xeon.
+        #    Use disabledWhen on individual items (step 6) instead of hiding the whole group.
+        # Replace any restrictive visibleIf with one that always returns true.
+        js = re.sub(
+            r"(visibleIf:\s*\(values\)\s*=>\s*\{)([\s\S]*?)(,\s*\n\s*items:)",
+            r"\1\n          return true;\n        }\3",
+            js,
+        )
+        # Also handle single-line arrow visibleIf patterns
+        js = re.sub(
+            r"visibleIf:\s*\(values\)\s*=>\s*[^,\n{]+(?:,|\n)",
+            "visibleIf: () => true,\n",
+            js,
+        )
+
+        # 3. Add w8a8 quantization item (only if the item entry is absent)
+        if "id: 'w8a8'" not in js and 'id: "w8a8"' not in js and "w8a8" in intel_quant_variants:
+            js = re.sub(
+                r"(\{\s*id:\s*'fp8'[^}]*\})",
+                r"\1,\n          { id: 'w8a8', label: 'W8A8 (INT8)', default: false }",
+                js,
+            )
+
+        # 4. Add Intel Xeon branch to generateCommand if not present
+        if "device cpu" not in js:
+            size_pat = re.compile(r"[-._](\d+(?:\.\d+)?[bB])(?:[-._]|$)")
+            intel_by_size: Dict[str, Dict[str, str]] = {}
+            for m in intel_models:
+                sm = size_pat.search(m)
+                sz = sm.group(1).lower() if sm else "unknown"
+                is_inst = bool(re.search(r"instruct", m, re.IGNORECASE))
+                qm = re.search(r"(?:[-._])(fp8|w8a8|w4a16|awq|gptq|quantized(?:\.[a-z0-9]+)*)", m, re.IGNORECASE)
+                if qm:
+                    raw_q = qm.group(1).lower()
+                    quant = raw_q.split(".", 1)[1] if raw_q.startswith("quantized.") else raw_q
+                else:
+                    quant = "bf16"
+                cat = "instruct" if is_inst else "base"
+                intel_by_size.setdefault(sz, {})[f"{cat}_{quant}"] = m
+
+            lookup_lines = ["        // Intel Xeon: quantization- and size-aware model selection"]
+            for sz, variants in sorted(intel_by_size.items()):
+                for variant_key, mid in sorted(variants.items()):
+                    cat_part, quant_part = variant_key.split("_", 1)
+                    lookup_lines.append(
+                        f"        if (modelsize === '{sz}' && category === '{cat_part}'"
+                        f" && (quantization === '{quant_part}' || quantization === '{quant_part.upper()}'))"
+                        f" modelId = '{mid}';"
+                    )
+            if not lookup_lines[1:]:
+                lookup_lines.append(f"        if (hardware === 'xeon') modelId = '{example_model}';")
+            intel_cmd_lines = "\n".join(lookup_lines)
+            intel_branch = (
+                f"\n      }} else if (hardware === 'xeon') {{\n"
+                f"{intel_cmd_lines}\n"
+                f"        const xeonTp = modelsize === '405b' ? 4 : (modelsize === '70b' ? 2 : 1);\n"
+                f"        args.push(`--tp ${{xeonTp}}`);\n"
+                f"        args.push(`--device cpu`);\n"
+            )
+            # Insert the Xeon branch after the AMD block (look for the closing of the TP block)
+            js = re.sub(
+                r"(}\s*else\s*\{\s*\n\s*//\s*NVIDIA GPU TP)([\s\S]*?)(}\s*\n\s*// Build command)",
+                lambda m2: m2.group(1) + m2.group(2) + "}" + intel_branch + "\n\n      // Build command",
+                js,
+                count=1,
+            )
+
+        # 5. Patch existing Intel Xeon branch: inject per-quant model lookup if missing
+        if w8a8_model and "w8a8" not in js:
+            intel_by_size_patch: Dict[str, Dict[str, str]] = {}
+            size_pat2 = re.compile(r"[-._](\d+(?:\.\d+)?[bB])(?:[-._]|$)")
+            for m in intel_models:
+                sm = size_pat2.search(m)
+                sz = sm.group(1).lower() if sm else "unknown"
+                is_inst = bool(re.search(r"instruct", m, re.IGNORECASE))
+                qm2 = re.search(r"(?:[-._])(fp8|w8a8|w4a16|awq|gptq|quantized(?:\.[a-z0-9]+)*)", m, re.IGNORECASE)
+                if qm2:
+                    raw_q = qm2.group(1).lower()
+                    quant = raw_q.split(".", 1)[1] if raw_q.startswith("quantized.") else raw_q
+                else:
+                    quant = "bf16"
+                cat = "instruct" if is_inst else "base"
+                intel_by_size_patch.setdefault(sz, {})[f"{cat}_{quant}"] = m
+
+            model_lookup_lines: List[str] = ["        // Intel Xeon quantization-aware model selection"]
+            for sz, variants in sorted(intel_by_size_patch.items()):
+                for variant_key, mid in sorted(variants.items()):
+                    cat_part, quant_part = variant_key.split("_", 1)
+                    model_lookup_lines.append(
+                        f"        if (modelsize === '{sz}' && category === '{cat_part}'"
+                        f" && (quantization === '{quant_part}' || quantization === '{quant_part.upper()}'))"
+                        f" modelId = '{mid}';"
+                    )
+            lookup_block = "\n".join(model_lookup_lines) + "\n"
+            js = re.sub(
+                r"((?:else\s+if\s*\(\s*(?:intelBackends|'\w*xeon\w*'|hardware\s*===\s*'xeon')[^)]*\)\s*\{|hardware\s*===\s*'xeon'\s*\{))([\s\S]*?)(args\.push\(`--tp)",
+                lambda m2: m2.group(1) + "\n" + lookup_block + "        " + m2.group(3),
+                js,
+                count=1,
+            )
+
+        # 6. Apply disabledWhen to quantization items based on quant_hardware_map.
+        #    - Universal quants: no disabledWhen (available on all hardware)
+        #    - Intel-only quants (e.g. w8a8 from RedHatAI): disable when hardware !== 'xeon'
+        #    - AMD-only quants: disable when hardware is not AMD
+        #    Do NOT add disabledWhen to model-size items (e.g. 405b) — that was incorrect.
+        quant_hardware_map: Dict[str, Any] = variant_info.get("quant_hardware_map") or {}
+        amd_hw_set = "['mi300x', 'mi325x', 'mi355x']"
+        for quant, hw_info in quant_hardware_map.items():
+            if hw_info.get("universal"):
+                continue  # no restriction
+            only_on = hw_info.get("only_on") or []
+            if not only_on:
+                continue
+            if "xeon" in only_on and len(only_on) == 1:
+                disabled_fn = "(values) => values.hardware !== 'xeon'"
+                reason = f"'{quant.upper()} is only available on Xeon'"
+            elif all(h in {"mi300x", "mi325x", "mi355x"} for h in only_on):
+                disabled_fn = f"(values) => !{amd_hw_set}.includes(values.hardware)"
+                reason = f"'{quant.upper()} is only available on AMD GPUs'"
+            else:
+                continue
+            # Patch the quant item in the JS items array
+            js = re.sub(
+                rf"(\{{\s*id:\s*'{quant}'[^}}]*?)(,?\s*\}})",
+                lambda m, dfn=disabled_fn, rsn=reason: m.group(0)
+                if "disabledWhen" in m.group(0)
+                else m.group(1).rstrip() + f", disabledWhen: {dfn}, disabledReason: {rsn}" + " }",
+                js,
+            )
+
+        # 7. Remove stale `intelCpuBackend` export appended by fallback code (not part of component).
+        js = re.sub(
+            r"\n*//\s*Intel CPU[^\n]*\nexport const intelCpuBackend[\s\S]*?;\s*$",
+            "",
+            js,
+            flags=re.MULTILINE,
+        )
+
+        return js
+
+    @staticmethod
+    def _build_llm_prompt(ctx: Dict[str, Any], resolved_mode: str) -> str:
+        model_list = GenerateReadmeTool._dedup_str_list(ctx.get("model_list") or [])
+        model_id_list = GenerateReadmeTool._dedup_str_list(ctx.get("model_id_list") or [])
+        all_models = model_id_list or model_list
+        example_model = next(
+            (m for m in all_models if "instruct" in m.lower() and "8b" in m.lower()
+             and "fp8" not in m.lower() and "w8a8" not in m.lower()),
+            all_models[0] if all_models else "<MODEL_ID>",
+        )
+
+        if is_url_source_mode(resolved_mode):
+            # Use full source text — never truncate when augmenting.
+            ref_md = str(ctx.get("ref_md") or "")
+            ref_js = str(ctx.get("ref_index_js") or "")
+            variant_info = GenerateReadmeTool._classify_models_by_variant(all_models)
+            intel_models = variant_info["intel_models"]
+            intel_quant_variants = variant_info["intel_quant_variants"]
+            w8a8_model = next((m for m in all_models if "w8a8" in m.lower()), "")
+
+            # Build per-variant command examples for the prompt
+            quant_pat = re.compile(
+                r"(?:[-._])(fp8|bf16|int8|int4|w8a8|w4a16|awq|gptq|quantized(?:\.[a-z0-9]+)*)",
+                flags=re.IGNORECASE,
+            )
+            cmd_examples: List[str] = []
+            seen_quants: set = set()
+            for m in intel_models:
+                qm = quant_pat.search(m)
+                if qm:
+                    raw_q = qm.group(1).lower()
+                    quant = raw_q.split(".", 1)[1] if raw_q.startswith("quantized.") else raw_q
+                else:
+                    quant = "bf16"
+                if quant in seen_quants:
+                    continue
+                seen_quants.add(quant)
+                cmd_examples.append(
+                    f"# {quant.upper()}\nsglang serve {m} --tp 1 --device cpu"
+                )
+            intel_cmd_block = "\n\n".join(cmd_examples)
+
+            return f"""You are a technical documentation writer for LLM serving infrastructure.
+
+Your task is to AUGMENT the two source files below by adding Xeon support.
+Do NOT rewrite, restructure, or shorten any existing content.
+Return the COMPLETE files — every existing line must be preserved exactly as-is,
+with Xeon content inserted at the appropriate places following the same style.
+
+---
+### SOURCE family_md (keep every line; only add Xeon sections):
+{ref_md}
+
+### SOURCE family_index_jsx (keep every line; only extend for Xeon):
+{ref_js}
+
+---
+### Xeon models to support (use EXACT IDs):
+{json.dumps(intel_models, ensure_ascii=False)}
+
+### Quantization variants for Xeon: {json.dumps(intel_quant_variants)}
+{"### W8A8 model ID: " + w8a8_model if w8a8_model else ""}
+### Example model: {example_model}
+
+---
+### What to ADD to family_md (without removing or changing anything existing):
+1. Add a new backend subsection for Xeon in the same style as the CUDA and AMD sections.
+   - Refer to this hardware as "Xeon" only (NOT "Intel CPU Xeon", NOT "Intel Xeon (CPU)").
+   - Include ALL configuration tips relevant to Xeon (TP scaling across sockets, BF16/FP8/W8A8 variants, etc.).
+   - Include one launch command block per quantization variant, using exact model IDs:
+{intel_cmd_block}
+   - Add `--tp 2 --device cpu` variant for dual-socket.
+2. Add a Xeon Configuration Tips subsection (matching the style of NVIDIA/AMD tips) covering:
+   - Socket-level TP: single socket --tp 1, dual socket --tp 2
+   - BF16 / FP8 / W8A8 quantization guidance for CPU deployment
+3. Do NOT add a benchmark block for Xeon — only CUDA/AMD benchmarks should remain.
+4. Do NOT change any existing sections, headings, or commands.
+
+### What to ADD/CHANGE in family_index_jsx (without removing any existing code):
+1. Add `{{ id: 'xeon', label: 'Xeon', default: false, backend: 'intel' }}` to the hardware items list, after the last AMD item.
+2. Set `quantization.visibleIf` to ALWAYS return true (`visibleIf: () => true`).
+   Do NOT hide quantization for any hardware type — use `disabledWhen` on individual items instead.
+3. Add `{{ id: 'w8a8', label: 'W8A8 (INT8)', default: false, disabledWhen: (values) => values.hardware !== 'xeon', disabledReason: 'W8A8 is only available on Xeon' }}` to the quantization items (after fp8).
+4. In `generateCommand`, add a Xeon branch (before or after the AMD branch) that:
+   - Sets `--device cpu` and `--tp` based on model size (8B→1, 70B→2, 405B→4).
+   - Resolves the correct model ID based on (modelsize, category, quantization), e.g.:
+     w8a8 → `{w8a8_model or "RedHatAI/Meta-Llama-3.1-8B-Instruct-quantized.w8a8"}`.
+   - Does NOT add `--kv-cache-dtype` (unsupported on CPU).
+5. Do NOT add `disabledWhen` to model size items (e.g. 405b) — all sizes in model_list are supported.
+6. NVIDIA-specific optimizations (speculative decoding, etc.) must only apply when hardware is NVIDIA,
+   NOT when hardware is 'xeon'. Change `if (!isAMD)` to `if (!isAMD && hardware !== 'xeon')`.
+
+---
+Output ONLY valid JSON with exactly this schema (no markdown fences):
+{{
+  "family_md": "<complete augmented README — every original line preserved>",
+  "family_index_js": "<complete augmented index.jsx — every original line preserved>"
+}}"""
+
+        # Legacy / reference mode — keep existing compact prompt.
+        return f"""You are generating family-level deployment docs.
 Input context JSON:
 {json.dumps(ctx, ensure_ascii=False)}
 
 Output ONLY JSON with schema:
 {{
   "family_md": "full markdown",
-  "family_index_js": "main index.js content",
-  "family_js_files": [{{"path":"index.js","content":"..."}}],
+  "family_index_js": "main index.jsx content",
   "memory_cleanup": {{
     "model_list": ["..."]
   }}
 }}
 
 Rules:
-1. One unified flow with internal branching by generation_mode.
-2. legacy/reference: adapt from ref_md/ref_index_js to current model_list/model_id_list.
-3. url_source/web_sources/github_folders: preserve official structure and include Intel CPU alongside CUDA/AMD.
-4. Must align README and JS model choices to model_list.
-5. Return valid JSON only.
+1. Adapt ref_md/ref_index_js to current model_list/model_id_list.
+2. Must align README and JS model choices to model_list.
+3. Return valid JSON only.
 """
-        response = GenerateReadmeTool.llm.invoke(prompt)
+
+    @staticmethod
+    def _llm_generate_family_artifacts(ctx: Dict[str, Any]) -> Dict[str, Any]:
+        resolved_mode = str(ctx.get("generation_mode") or "reference").strip().lower()
+        prompt = GenerateReadmeTool._build_llm_prompt(ctx, resolved_mode)
+        print(f"[llm_generate] prompt size: {len(prompt)} chars, mode: {resolved_mode}")
+        # Use streaming for url_source mode (large prompt + large response) so we
+        # see live token output and never block silently.
+        if is_url_source_mode(resolved_mode):
+            print("[llm_generate] streaming response (url_source mode) ...")
+            response = GenerateReadmeTool.llm.invoke_stream(prompt, timeout=600, print_progress=True)
+        else:
+            response = GenerateReadmeTool.llm.invoke(prompt, timeout=300)
         cleaned = GenerateReadmeTool._strip_think_blocks(response)
         cleaned_lower = cleaned.lstrip().lower()
         if cleaned_lower.startswith("<!doctype html") or cleaned_lower.startswith("<html") or "ie friendly error message walkround" in cleaned_lower:
@@ -443,6 +1099,17 @@ Rules:
         models = GenerateReadmeTool._dedup_str_list(ctx.get("model_list") or [])
         mids = GenerateReadmeTool._dedup_str_list(ctx.get("model_id_list") or [])
         md, idx = GenerateReadmeTool._normalize_artifacts_to_target_models(md, idx, models, mids)
+        # For url_source mode: guarantee JS patches are applied even if LLM missed some.
+        if is_url_source_mode(resolved_mode):
+            all_models = mids or models
+            variant_info = GenerateReadmeTool._classify_models_by_variant(all_models)
+            idx = GenerateReadmeTool._patch_js_for_intel_xeon(idx, variant_info)
+            if js_files:
+                primary_idx = next(
+                    (i for i, x in enumerate(js_files) if x.get("path", "").split("/")[-1] == "index.js"),
+                    0,
+                )
+                js_files[primary_idx]["content"] = idx
         return {
             "family_md": md,
             "family_index_js": idx,
@@ -502,6 +1169,8 @@ Rules:
             "remote_payload": GenerateReadmeTool.global_memory.memory_retrieve("remote_payload") or {},
             "github_md_folder_url": GenerateReadmeTool.global_memory.memory_retrieve("github_md_folder_url") or "",
             "github_js_folder_url": GenerateReadmeTool.global_memory.memory_retrieve("github_js_folder_url") or "",
+            "source_md_url": GenerateReadmeTool.global_memory.memory_retrieve("source_md_url") or "",
+            "source_js_url": GenerateReadmeTool.global_memory.memory_retrieve("source_js_url") or "",
             "model_list": GenerateReadmeTool.global_memory.memory_retrieve("model_list") or [],
             "model_id_list": GenerateReadmeTool.global_memory.memory_retrieve("model_id_list") or [],
             "model_url_list": GenerateReadmeTool.global_memory.memory_retrieve("model_url_list") or [],
@@ -516,9 +1185,314 @@ Rules:
             "family_content": GenerateReadmeTool.global_memory.memory_retrieve("family_content") or "",
         }
 
+    @staticmethod
+    def _ensure_source_js_from_ref_md() -> None:
+        """If source_js_url is empty but ref_md is set, scan the MDX content for a component
+        import statement and derive + fetch the JS source into memory.
+
+        This is called at the start of readme_generation because the MDX content is first
+        fetched (stored as ref_md / source_md_files) during _prepare_memory, so the raw text
+        is already available here without any extra HTTP round-trip.
+        """
+        memory = GenerateReadmeTool.global_memory
+        if not memory:
+            return
+        source_js_url = str(memory.memory_retrieve("source_js_url") or "").strip()
+        if source_js_url:
+            return  # Already set — nothing to do.
+
+        # Use the already-fetched MDX text.
+        ref_md = str(memory.memory_retrieve("ref_md") or "").strip()
+        if not ref_md:
+            md_files = normalize_list(memory.memory_retrieve("source_md_files") or [])
+            if md_files and isinstance(md_files[0], dict):
+                ref_md = str(md_files[0].get("content") or "").strip()
+        if not ref_md:
+            return
+
+        # We need to know the GitHub repo coordinates to build the JS URL.
+        source_md_url = str(memory.memory_retrieve("source_md_url") or "").strip()
+        if not source_md_url:
+            return
+
+        # Extract owner/repo/branch from the MD URL (same helper as crew.py).
+        try:
+            from urllib.parse import urlparse as _urlparse
+            parsed = _urlparse(source_md_url)
+            parts = [p for p in (parsed.path or "").strip("/").split("/") if p]
+            if len(parts) < 4:
+                return
+            owner, repo, _kind, branch = parts[0], parts[1], parts[2], parts[3]
+            md_path = "/".join(parts[4:])
+        except Exception:
+            return
+
+        # Pattern 1: absolute repo-root path import (e.g. '/src/snippets/.../foo.jsx')
+        # In Docusaurus, /src/ is relative to the project root, which is the first
+        # directory component of the MDX path (e.g. 'docs_new' for 'docs_new/cookbook/...').
+        abs_m = re.search(r"import\s+[^'\"]+from\s+['\"]/(src/[^'\"]+\.jsx?)['\"]", ref_md)
+        if abs_m:
+            comp_path_rel = abs_m.group(1)  # e.g. src/snippets/autoregressive/llama31-deployment.jsx
+            # Prepend the docusaurus root (first component of MDX path)
+            md_parts = [p for p in md_path.split("/") if p]
+            docs_root = md_parts[0] if len(md_parts) >= 2 else ""
+            comp_path_abs = f"{docs_root}/{comp_path_rel}" if docs_root else comp_path_rel
+            derived_js_url = f"https://github.com/{owner}/{repo}/blob/{branch}/{comp_path_abs}"
+        # Pattern 2: Docusaurus @site import
+        elif (site_m := re.search(r"import\s+\w+\s+from\s+['\"]@site/([^'\"]+)['\"]", ref_md)):
+            comp_rel = site_m.group(1).strip("/")
+            if comp_rel.endswith((".js", ".jsx")):
+                derived_js_url = f"https://github.com/{owner}/{repo}/blob/{branch}/{comp_rel}"
+            else:
+                derived_js_url = f"https://github.com/{owner}/{repo}/blob/{branch}/{comp_rel}/index.jsx"
+        else:
+            # Pattern 3: relative import
+            rel_m = re.search(r"import\s+\w+\s+from\s+['\"](\.\.[^'\"]+)['\"]", ref_md)
+            if rel_m:
+                rel = rel_m.group(1).strip()
+                md_dir = "/".join(md_path.split("/")[:-1])
+                parts_r = (md_dir + "/" + rel).split("/")
+                resolved: List[str] = []
+                for p in parts_r:
+                    if p == "..":
+                        if resolved:
+                            resolved.pop()
+                    elif p not in ("", "."):
+                        resolved.append(p)
+                comp_path = "/".join(resolved)
+                ext = "" if comp_path.endswith((".js", ".jsx")) else "/index.jsx"
+                derived_js_url = f"https://github.com/{owner}/{repo}/blob/{branch}/{comp_path}{ext}"
+            else:
+                # Pattern 3: component tag hint
+                comp_m = re.search(r"<!--\s*组件引用[：:]\s*(\w+)\s*-->|<(\w+ConfigGenerator)\s*/?>", ref_md)
+                if comp_m:
+                    comp_name = (comp_m.group(1) or comp_m.group(2) or "").strip()
+                    if comp_name:
+                        derived_js_url = (
+                            f"https://github.com/{owner}/{repo}/blob/{branch}"
+                            f"/src/components/autoregressive/{comp_name}/index.js"
+                        )
+                    else:
+                        return
+                else:
+                    return
+
+        print(f"[_ensure_source_js_from_ref_md] derived source_js_url: {derived_js_url}")
+        memory.memory_store("source_js_url", derived_js_url)
+
+        # Fetch the JS file content and store it as ref_index_js / source_js_files.
+        # Re-use the same fetch infrastructure from crew.py via a lightweight import.
+        try:
+            from urllib.request import ProxyHandler, Request, build_opener
+            import os as _os
+            # Parse the GitHub blob URL to get the raw download URL.
+            parts2 = [p for p in derived_js_url.replace("https://github.com/", "").split("/") if p]
+            # parts2: [owner, repo, 'blob', branch, ...path]
+            if len(parts2) >= 5 and parts2[2] == "blob":
+                js_path = "/".join(parts2[4:])
+                raw_js_url = f"https://raw.githubusercontent.com/{owner}/{repo}/{branch}/{js_path}"
+            else:
+                raw_js_url = derived_js_url
+
+            proxy = (
+                _os.getenv("https_proxy", "").strip()
+                or _os.getenv("HTTPS_PROXY", "").strip()
+                or "http://proxy-dmz.intel.com:912"
+            )
+            opener = build_opener(ProxyHandler({"http": proxy, "https": proxy}))
+            req = Request(raw_js_url, headers={"User-Agent": "readme-generator"}, method="GET")
+            with opener.open(req, timeout=30) as resp:
+                js_content = resp.read().decode("utf-8", errors="ignore")
+
+            memory.memory_store("ref_index_js", js_content)
+            memory.memory_store("source_js_files", [{"path": js_path if 'js_path' in dir() else "index.js", "content": js_content}])
+            print(f"[_ensure_source_js_from_ref_md] fetched JS content ({len(js_content)} chars) from {raw_js_url}")
+        except Exception as e:
+            print(f"[_ensure_source_js_from_ref_md][WARN] could not fetch JS content: {e}")
+
+    # ── Pipeline step tools ────────────────────────────────────────────────────────────────
+    # Each tool wraps exactly one logical step so that:
+    #   - CrewAI verbose output shows per-step input/output when an agent calls them.
+    #   - The bypassed _run_stage path in crew.py can call them one-by-one with prints.
+
+    @tool("step_ensure_source_js_url")
+    def step_ensure_source_js_url() -> Dict[str, Any]:
+        """[Step 1] Derive source_js_url from the MDX component import in the already-fetched MDX text,
+        then fetch and store the JS file content as ref_index_js.
+        Only runs when source_js_url is not already set."""
+        GenerateReadmeTool._ensure_source_js_from_ref_md()
+        source_js_url = str(GenerateReadmeTool.global_memory.memory_retrieve("source_js_url") or "")
+        ref_index_js = str(GenerateReadmeTool.global_memory.memory_retrieve("ref_index_js") or "")
+        return {
+            "source_js_url": source_js_url or "(not set)",
+            "ref_index_js_fetched": len(ref_index_js) > 0,
+            "ref_index_js_chars": len(ref_index_js),
+        }
+
+    @tool("step_resolve_generation_mode")
+    def step_resolve_generation_mode() -> Dict[str, Any]:
+        """[Step 2] Determine whether to use 'web_sources' or 'reference' generation mode
+        based on available context in memory. Stores resolved mode back to memory."""
+        ctx = GenerateReadmeTool.memory_retrieve_generation_context.func()
+        mode, mode_from = GenerateReadmeTool._resolve_generation_mode(ctx)
+        GenerateReadmeTool.global_memory.memory_store("generation_mode", mode)
+        return {
+            "resolved_mode": mode,
+            "decision_source": mode_from,
+            "model_list_count": len(GenerateReadmeTool._dedup_str_list(ctx.get("model_list") or [])),
+            "has_ref_md": bool(str(ctx.get("ref_md") or "").strip()),
+            "has_ref_index_js": bool(str(ctx.get("ref_index_js") or "").strip()),
+        }
+
+    @tool("step_classify_models")
+    def step_classify_models() -> Dict[str, Any]:
+        """[Step 3] Classify models from memory into quantization variants and hardware-specific groups
+        (universal / Intel Xeon only / AMD only). Returns a summary of the classification."""
+        model_id_list = GenerateReadmeTool._dedup_str_list(
+            GenerateReadmeTool.global_memory.memory_retrieve("model_id_list") or []
+        )
+        model_list = GenerateReadmeTool._dedup_str_list(
+            GenerateReadmeTool.global_memory.memory_retrieve("model_list") or []
+        )
+        all_models = model_id_list or model_list
+        if not all_models:
+            return {"all_models_count": 0, "quant_variants": [], "quant_hardware_map": {}}
+        info = GenerateReadmeTool._classify_models_by_variant(all_models)
+        return {
+            "all_models_count": len(info["all_models"]),
+            "intel_models_count": len(info["intel_models"]),
+            "quant_variants": info["quant_variants"],
+            "quant_hardware_map": {
+                q: ("universal" if v.get("universal") else f"only_on={v.get('only_on')}")
+                for q, v in info["quant_hardware_map"].items()
+            },
+        }
+
+    @tool("step_run_llm_generation")
+    def step_run_llm_generation() -> Dict[str, Any]:
+        """[Step 4] Call the LLM to generate family_md and family_index_js from the generation context.
+        Falls back to reference-based generation if the LLM call fails.
+        Stores the raw generated dict to pipeline state for the next step."""
+        ctx = GenerateReadmeTool.memory_retrieve_generation_context.func()
+        llm_error = ""
+        try:
+            generated = GenerateReadmeTool._llm_generate_family_artifacts(ctx)
+        except Exception as e:
+            llm_error = f"{type(e).__name__}: {e}"
+            generated = GenerateReadmeTool._fallback_generate_from_reference(ctx)
+            generated["llm_error"] = llm_error
+        GenerateReadmeTool._pipeline["llm_generation_raw"] = generated
+        return {
+            "source": generated.get("source", "unknown"),
+            "family_md_chars": len(str(generated.get("family_md") or "")),
+            "family_index_js_chars": len(str(generated.get("family_index_js") or "")),
+            "llm_error": llm_error or "none",
+        }
+
+    @tool("step_postprocess_artifacts")
+    def step_postprocess_artifacts() -> Dict[str, Any]:
+        """[Step 5] Apply post-processing to the LLM-generated artifacts:
+        model-name normalization, launch-command injection, MDX component reference fix,
+        and Xeon section injection/JS patching.
+        Stores the processed artifacts to pipeline state."""
+        ctx = GenerateReadmeTool.memory_retrieve_generation_context.func()
+        generated = GenerateReadmeTool._pipeline.get("llm_generation_raw") or {}
+        if not generated:
+            generated = GenerateReadmeTool._fallback_generate_from_reference(ctx)
+
+        family_md = str(generated.get("family_md") or "").strip()
+        family_index_js = str(generated.get("family_index_js") or "").strip()
+        model_list = GenerateReadmeTool._dedup_str_list(ctx.get("model_list") or [])
+        model_id_list = GenerateReadmeTool._dedup_str_list(ctx.get("model_id_list") or [])
+        mode = str(ctx.get("generation_mode") or "reference").strip().lower()
+
+        # 5a. Normalize model name references in MD/JS
+        family_md, family_index_js = GenerateReadmeTool._normalize_artifacts_to_target_models(
+            family_md, family_index_js, model_list, model_id_list,
+        )
+        # 5b. Ensure launch + benchmark command blocks exist in MD
+        family_md = GenerateReadmeTool._ensure_readme_command_content(
+            family_md=family_md,
+            family_index_js=family_index_js,
+            model_list=model_list,
+            model_id_list=model_id_list,
+        )
+        # 5c. Fix MDX component reference placeholders → proper import + tag
+        family_md = GenerateReadmeTool._fix_md_component_references(family_md)
+        # 5d. Inject Intel Xeon sections (MD augmentation + JS patching)
+        family_md, family_index_js = GenerateReadmeTool._inject_intel_cpu_xeon_section(
+            family_md=family_md,
+            family_index_js=family_index_js,
+            model_list=model_list,
+            model_id_list=model_id_list,
+            mode=mode,
+        )
+        # 5e. Fix truncated closing tags (e.g. </div missing >) in both artifacts
+        family_md = GenerateReadmeTool._fix_unclosed_tags(family_md)
+        family_index_js = GenerateReadmeTool._fix_unclosed_tags(family_index_js)
+        GenerateReadmeTool._pipeline["postprocessed_artifacts"] = {
+            "family_md": family_md,
+            "family_index_js": family_index_js,
+            "family_js_files": generated.get("family_js_files") or [],
+        }
+        return {
+            "family_md_chars": len(family_md),
+            "family_index_js_chars": len(family_index_js),
+            "has_intel_xeon": "xeon" in family_md.lower() or "device cpu" in family_index_js.lower(),
+            "has_mdx_import": "import " in family_md and "from " in family_md,
+        }
+
+    @tool("step_store_final_artifacts")
+    def step_store_final_artifacts() -> Dict[str, Any]:
+        """[Step 6] Store the final postprocessed family_md and family_index_js to Global Memory
+        and compact any redundant intermediate memory entries."""
+        processed = GenerateReadmeTool._pipeline.get("postprocessed_artifacts") or {}
+        if not processed:
+            return {"ok": False, "error": "No postprocessed_artifacts in pipeline — run step_postprocess_artifacts first."}
+
+        family_md = str(processed.get("family_md") or "").strip()
+        family_index_js = str(processed.get("family_index_js") or "").strip()
+        raw_js_files = processed.get("family_js_files") or []
+
+        js_files = GenerateReadmeTool._normalize_js_files(raw_js_files)
+        if not js_files and family_index_js:
+            js_files = [{"path": "index.js", "content": family_index_js}]
+        elif js_files:
+            primary_idx = next(
+                (i for i, x in enumerate(js_files) if x.get("path", "").split("/")[-1] == "index.js"),
+                0,
+            )
+            js_files[primary_idx]["content"] = family_index_js
+
+        if len(js_files) > 1:
+            store_result = GenerateReadmeTool.memory_store_family_multi_artifacts.func(
+                family_md=family_md,
+                family_js_files_json=json.dumps(js_files, ensure_ascii=False),
+            )
+        else:
+            store_result = GenerateReadmeTool.memory_store_family_artifacts.func(
+                family_md=family_md,
+                family_index_js=family_index_js,
+            )
+        GenerateReadmeTool._compact_generation_memory()
+        # Clean up intermediate memory keys
+        GenerateReadmeTool._pipeline.clear()
+        return {
+            "ok": True,
+            "family_md_chars": len(family_md),
+            "family_index_js_chars": len(family_index_js),
+            "js_files_count": len(js_files),
+            "store_result": store_result,
+        }
+
+    # ── Monolithic convenience tool (kept for backward compat; delegates to steps) ───────
+
     @tool("memory_generate_and_store_family_artifacts")
     def memory_generate_and_store_family_artifacts() -> Dict[str, Any]:
         """Generate family_md/index.js from ref/source + model_list, store artifacts, and compact redundant memory lists."""
+        # Derive source_js_url (and fetch JS content) from the already-fetched MDX text
+        # when source_js_url was not explicitly provided.
+        GenerateReadmeTool._ensure_source_js_from_ref_md()
         ctx = GenerateReadmeTool.memory_retrieve_generation_context.func()
         resolved_mode, mode_from = GenerateReadmeTool._resolve_generation_mode(ctx)
         ctx["generation_mode"] = resolved_mode
@@ -548,9 +1522,28 @@ Rules:
                 model_list=model_list,
                 model_id_list=model_id_list,
             )
+            # Replace <!-- 组件引用：ComponentName --> placeholders with proper MDX imports.
+            family_md_norm = GenerateReadmeTool._fix_md_component_references(family_md_norm)
+            family_md_norm, family_index_js_norm = GenerateReadmeTool._inject_intel_cpu_xeon_section(
+                family_md=family_md_norm,
+                family_index_js=family_index_js_norm,
+                model_list=model_list,
+                model_id_list=model_id_list,
+                mode=ctx.get("generation_mode", ""),
+            )
+            # Fix truncated closing tags (e.g. </div missing >) in both artifacts
+            family_md_norm = GenerateReadmeTool._fix_unclosed_tags(family_md_norm)
+            family_index_js_norm = GenerateReadmeTool._fix_unclosed_tags(family_index_js_norm)
             js_files = GenerateReadmeTool._normalize_js_files(g.get("family_js_files") or [])
             if not js_files and family_index_js_norm:
                 js_files = [{"path": "index.js", "content": family_index_js_norm}]
+            elif js_files:
+                # Sync primary index.js content with any post-processing changes (e.g. Intel injection).
+                primary_idx = next(
+                    (i for i, x in enumerate(js_files) if x.get("path", "").split("/")[-1] == "index.js"),
+                    0,
+                )
+                js_files[primary_idx]["content"] = family_index_js_norm
             if len(js_files) > 1:
                 return GenerateReadmeTool.memory_store_family_multi_artifacts.func(
                     family_md=family_md_norm,

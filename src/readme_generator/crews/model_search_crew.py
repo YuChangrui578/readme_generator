@@ -13,7 +13,7 @@ from crewai.llm import LLM
 from readme_generator.tools.model_search_tool import ModelSearchTool
 from readme_generator.tools.memory_tool import MemoryTool
 from readme_generator.tools.get_step import create_step_callback
-from langchain_openai import ChatOpenAI
+
 
 LLM_BASE_URL = os.getenv("README_GENERATOR_LLM_BASE_URL", "http://10.54.34.78:30000/v1")
 LLM_MODEL = os.getenv("README_GENERATOR_LLM_MODEL", "your-local-model")
@@ -38,6 +38,37 @@ class ModelSearchCrew:
     def __init__(self, global_memory=None):
         self.global_memory = global_memory
         ModelSearchTool.global_memory = global_memory
+        # In url_source/web_sources mode the model_list is already known — store it directly
+        # as model_id_list and mark bypass so the crew kickoff can be skipped.
+        self._url_source_bypass = False
+        if global_memory is not None:
+            mode = str(global_memory.memory_retrieve("generation_mode") or "").strip().lower()
+            from readme_generator.tools.common_utils import is_url_source_mode
+            if is_url_source_mode(mode):
+                from readme_generator.tools.common_utils import normalize_list as _nl
+                model_list = _nl(
+                    global_memory.memory_retrieve("model_list") or [],
+                    fallback_single_str=True, stringify_items=True,
+                )
+                if model_list:
+                    deduped, seen_k = [], set()
+                    from readme_generator.tools.model_search_tool import HuggingFaceModelClient as _HFC
+                    for m in model_list:
+                        s = str(m or "").strip()
+                        if not s:
+                            continue
+                        k = _HFC._query_key(s)
+                        if k in seen_k:
+                            continue
+                        seen_k.add(k)
+                        deduped.append(s)
+                    urls = [f"https://huggingface.co/{m}" for m in deduped]
+                    global_memory.memory_store("model_list", deduped)
+                    global_memory.memory_store("model_id_list", deduped)
+                    global_memory.memory_store("model_url_list", urls)
+                    global_memory.save_to_file()
+                    self._url_source_bypass = True
+                    print(f"[ModelSearchCrew] url_source mode: using provided model_list directly ({len(deduped)} models), skipping HF search.")
 
     @agent
     def model_search_agent(self)->Agent:
@@ -66,3 +97,11 @@ class ModelSearchCrew:
             verbose=True,
             stream=True
         )
+
+    def kickoff(self):
+        """Run the crew, or return a bypass result immediately in url_source mode."""
+        if self._url_source_bypass:
+            model_list = self.global_memory.memory_retrieve("model_list") or []
+            print(f"[ModelSearchCrew] bypass active — returning stored model_list ({len(model_list)} items) without HF search.")
+            return {"model_list": model_list, "source": "bypass_url_source"}
+        return self.crew().kickoff()

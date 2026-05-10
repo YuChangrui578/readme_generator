@@ -168,7 +168,7 @@ Input text:
 Output ONLY valid JSON:
 """
         try:
-            response = cls.llm.invoke(prompt)
+            response = cls.llm.invoke(prompt, timeout=120)
             response = cls._strip_think_blocks(response)
             parsed = json.loads(response.strip())
 

@@ -296,18 +296,109 @@ def _load_files_from_source_url(url: str, suffixes: tuple[str, ...], github_toke
     return [{"path": name, "content": text}]
 
 
+import re as _re
+
+def _resolve_js_url_from_mdx(md_url: str, github_token: str = "") -> str:
+    """Given a GitHub URL for a .md/.mdx file, fetch its content and look for a component
+    import statement (e.g. ``import Foo from '@site/src/components/...'``).
+    Returns the corresponding GitHub blob URL for the component's index.js/index.jsx, or "".
+
+    Supports Docusaurus-style @site imports and relative imports.
+    """
+    if not md_url:
+        return ""
+    try:
+        info = _parse_github_source_url(md_url)
+        owner, repo, branch, md_path = info["owner"], info["repo"], info["branch"], info["path"]
+    except Exception:
+        return ""
+
+    # Fetch the raw markdown text
+    raw_url = f"https://raw.githubusercontent.com/{owner}/{repo}/{branch}/{md_path}"
+    try:
+        text = _fetch_url_text(raw_url, token=github_token)
+    except Exception:
+        try:
+            text = _fetch_url_text(md_url, token=github_token)
+        except Exception:
+            return ""
+
+    # Look for component import in MDX — several patterns supported
+    # Pattern 1: absolute repo-root path import (sgl-cookbook convention)
+    #   e.g.  import { Gemma4Deployment } from '/src/snippets/autoregressive/gemma4-deployment.jsx';
+    # In Docusaurus, /src/ is relative to the project root = first dir component of MDX path.
+    abs_import = _re.search(
+        r"import\s+[^'\"]+from\s+['\"]/(src/[^'\"]+\.jsx?)['\"]",
+        text,
+    )
+    if abs_import:
+        comp_path_rel = abs_import.group(1)  # e.g. src/snippets/autoregressive/gemma4-deployment.jsx
+        md_parts = [p for p in md_path.split("/") if p]
+        docs_root = md_parts[0] if len(md_parts) >= 2 else ""
+        comp_path = f"{docs_root}/{comp_path_rel}" if docs_root else comp_path_rel
+        return f"https://github.com/{owner}/{repo}/blob/{branch}/{comp_path}"
+
+    # Pattern 2: Docusaurus @site import
+    #   e.g.  import Llama31Config from '@site/src/components/Llama31ConfigGenerator';
+    site_import = _re.search(
+        r"import\s+\w+\s+from\s+['\"]@site/([^'\"]+)['\"]",
+        text,
+    )
+    if site_import:
+        comp_rel = site_import.group(1).strip("/")
+        # Prefer index.jsx, fallback to index.js
+        for ext in ("index.jsx", "index.js"):
+            candidate_path = f"{comp_rel}/{ext}" if not comp_rel.endswith((".js", ".jsx")) else comp_rel
+            js_url = f"https://github.com/{owner}/{repo}/blob/{branch}/{candidate_path}"
+            return js_url
+
+    # Pattern 3: relative import like ../components/FooGenerator or ../../base/ConfigGenerator
+    rel_import = _re.search(
+        r"import\s+\w+\s+from\s+['\"](\.\.[^'\"]+)['\"]",
+        text,
+    )
+    if rel_import:
+        rel = rel_import.group(1).strip()
+        md_dir = "/".join(md_path.split("/")[:-1])
+        # Resolve relative path manually
+        parts = (md_dir + "/" + rel).split("/")
+        resolved: List[str] = []
+        for p in parts:
+            if p == "..":
+                if resolved:
+                    resolved.pop()
+            elif p not in ("", "."):
+                resolved.append(p)
+        comp_path = "/".join(resolved)
+        for ext in ("index.jsx", "index.js"):
+            candidate = f"{comp_path}/{ext}" if not comp_path.endswith((".js", ".jsx")) else comp_path
+            return f"https://github.com/{owner}/{repo}/blob/{branch}/{candidate}"
+
+    # Pattern 3: look for JSX component usage <!-- 组件引用：ComponentName --> or <ComponentName />
+    # and guess the path from component name convention
+    comp_name_m = _re.search(r"<!--\s*组件引用[：:]\s*(\w+)\s*-->|<(\w+ConfigGenerator)\s*/?>", text)
+    if comp_name_m:
+        comp_name = (comp_name_m.group(1) or comp_name_m.group(2) or "").strip()
+        if comp_name:
+            # Standard sgl-cookbook convention: src/components/autoregressive/<Name>/index.js
+            comp_path = f"src/components/autoregressive/{comp_name}/index.js"
+            return f"https://github.com/{owner}/{repo}/blob/{branch}/{comp_path}"
+
+    return ""
+
+
 def load_reference_files_from_github_folders(
     md_folder_url: str,
     js_folder_url: str,
     github_token: str = "",
 ) -> Dict[str, str]:
     try:
-        md_files = _load_files_from_source_url(md_folder_url, suffixes=(".md", ".markdown"), github_token=github_token)
+        md_files = _load_files_from_source_url(md_folder_url, suffixes=(".md", ".mdx", ".markdown"), github_token=github_token)
     except Exception:
         print(f"[WARN] md source fetch failed: {md_folder_url}")
         md_files = []
     try:
-        js_files = _load_files_from_source_url(js_folder_url, suffixes=(".js",), github_token=github_token)
+        js_files = _load_files_from_source_url(js_folder_url, suffixes=(".js", ".jsx"), github_token=github_token)
     except Exception:
         print(f"[WARN] js source fetch failed: {js_folder_url}")
         js_files = []
@@ -407,18 +498,31 @@ def build_github_only_legacy_workflow_input() -> WorkflowInput:
 
 
 def build_source_url_workflow_input() -> WorkflowInput:
-    """URL-source preset data from github source-url flow test."""
+    """URL-source preset data for Llama 3.1 models."""
     return WorkflowInput(
         memory_profile="url_source",
         generation_mode="web_sources",
-        source_md_url="https://github.com/sgl-project/sglang/blob/main/docs_new/cookbook/autoregressive/Qwen/Qwen3.mdx",
-
+        source_md_url="https://github.com/sgl-project/sglang/blob/main/docs_new/cookbook/autoregressive/Llama/Llama3.1.mdx",
         input_text=(
-            "请基于下面的.mdx文件做 Qwen3 的文档增强："
-            "https://github.com/sgl-project/sglang/blob/main/docs_new/cookbook/autoregressive/Qwen/Qwen3.mdx ，"
+            "请基于下面两个来源做 Llama3.1 的文档增强：README 来源是 "
+            "https://github.com/sgl-project/sglang/blob/main/docs_new/cookbook/autoregressive/Llama/Llama3.1.mdx ，"
             "请先从这些文件内容里推断模型列表，再继续后续流程。"
         ),
-        model_list=[],
+        model_list=[
+            "meta-llama/Llama-3.1-8B",
+            "meta-llama/Llama-3.1-8B-FP8",
+            "meta-llama/Llama-3.1-8B-Instruct",
+            "RedHatAI/Meta-Llama-3.1-8B-Instruct-quantized.w8a8",
+            "meta-llama/Llama-3.1-8B-Instruct-FP8",
+            "meta-llama/Llama-3.1-70B",
+            "meta-llama/Llama-3.1-70B-FP8",
+            "meta-llama/Llama-3.1-70B-Instruct",
+            "meta-llama/Llama-3.1-70B-Instruct-FP8",
+            "meta-llama/Llama-3.1-405B",
+            "meta-llama/Llama-3.1-405B-FP8",
+            "meta-llama/Llama-3.1-405B-Instruct",
+            "meta-llama/Llama-3.1-405B-Instruct-FP8",
+        ],
         github_url=[],
         skip_stages=[],
         remote_folder="",
@@ -481,6 +585,41 @@ class ReadmeWorkflowCrew(Flow[WorkflowState]):
                 )
             )
 
+        # ── Auto-fill from input_text (only when WorkflowInput fields are empty) ──────
+        # Run a cheap deterministic extraction pass so downstream stages (and the
+        # input_parser agent) start with the correct context even when the caller
+        # supplied only a free-form input_text.
+        github_token_early = ""
+        if isinstance(cfg.github_config, dict):
+            github_token_early = str(cfg.github_config.get("github_token") or "").strip()
+
+        if cfg.input_text:
+            # Step A: extract source_md_url / model_list from input_text if not already set.
+            _parsed_input: Dict[str, Any] = InternelParserLLM._extract_from_workflow_payload(cfg.input_text)
+            if not _parsed_input:
+                _parsed_input = InternelParserLLM._fallback_parse(cfg.input_text)
+
+            if isinstance(_parsed_input, dict):
+                # source_md_url: fill only if not already set
+                if not cfg.source_md_url:
+                    cfg.source_md_url = str(_parsed_input.get("source_md_url") or "").strip()
+                # source_js_url: fill only if not already set
+                if not cfg.source_js_url:
+                    cfg.source_js_url = str(_parsed_input.get("source_js_url") or "").strip()
+                # model_list: fill only if not already set
+                if not cfg.model_list:
+                    _ml = _parsed_input.get("model_list")
+                    if isinstance(_ml, list) and _ml:
+                        cfg.model_list = _ml
+                # generation_mode: elevate to web_sources if URLs found
+                if cfg.source_md_url and not cfg.generation_mode:
+                    cfg.generation_mode = str(_parsed_input.get("generation_mode") or "web_sources").strip().lower()
+
+        # ──────────────────────────────────────────────────────────────────────────────
+        # NOTE: source_js_url derivation from MDX content is intentionally deferred to
+        # the readme_generation stage, where the MDX has already been fetched into memory.
+        # See GenerateReadmeTool._ensure_source_js_from_ref_md() for that logic.
+
         ref_md = cfg.ref_md
         ref_index_js = cfg.ref_index_js
         source_md_files: List[Dict[str, str]] = []
@@ -509,10 +648,12 @@ class ReadmeWorkflowCrew(Flow[WorkflowState]):
         if mode in {"github_folders", "web_sources"}:
             md_url = cfg.github_md_folder_url or cfg.source_md_url
             js_url = cfg.github_js_folder_url or cfg.source_js_url
-            if not md_url or not js_url:
+            if not md_url:
                 raise ValueError(
-                    "generation_mode=github_folders/web_sources requires both md and js source URLs."
+                    "generation_mode=github_folders/web_sources requires at least a md source URL."
                 )
+            # js_url may be empty here — it will be derived from the fetched MDX content
+            # later in the readme_generation stage (GenerateReadmeTool._ensure_source_js_from_ref_md).
             refs = load_reference_files_from_github_folders(
                 md_folder_url=md_url,
                 js_folder_url=js_url,
@@ -538,7 +679,54 @@ class ReadmeWorkflowCrew(Flow[WorkflowState]):
         self.global_memory.memory_store("source_js_url", cfg.source_js_url)
         self.global_memory.memory_store("remote_folder", cfg.remote_folder)
         self.global_memory.memory_store("ssh_config", cfg.ssh_config)
-        self.global_memory.memory_store("github_config", cfg.github_config)
+
+        # In url_source/web_sources mode, auto-populate github_config.publish_items from
+        # the source URLs so the github_pr stage writes the generated files back to the
+        # same paths they came from (replacing the originals via PR).
+        effective_github_config = dict(cfg.github_config) if isinstance(cfg.github_config, dict) else {}
+        if mode in {"web_sources", "github_folders"} and not effective_github_config.get("publish_items"):
+            md_url_for_publish = (cfg.source_md_url or cfg.github_md_folder_url or "").strip()
+            js_url_for_publish = (cfg.source_js_url or cfg.github_js_folder_url or "").strip()
+            publish_items: List[Dict[str, Any]] = []
+            src_owner = src_repo = src_branch = ""
+            try:
+                if md_url_for_publish:
+                    md_info = _parse_github_source_url(md_url_for_publish)
+                    src_owner = md_info["owner"]
+                    src_repo = md_info["repo"]
+                    src_branch = md_info["branch"]
+                    publish_items.append({"path": md_info["path"], "content_key": "family_md"})
+            except Exception:
+                pass
+            try:
+                if js_url_for_publish:
+                    js_info = _parse_github_source_url(js_url_for_publish)
+                    if not src_owner:
+                        src_owner = js_info["owner"]
+                        src_repo = js_info["repo"]
+                        src_branch = js_info["branch"]
+                    publish_items.append({"path": js_info["path"], "content_key": "family_index_js"})
+            except Exception:
+                pass
+            if publish_items and src_owner and src_repo:
+                effective_github_config.setdefault("repo_owner", src_owner)
+                effective_github_config.setdefault("repo_name", src_repo)
+                effective_github_config.setdefault("base_branch", src_branch or "main")
+                effective_github_config.setdefault("head_branch", f"intel-xeon-support/{src_branch or 'main'}")
+                effective_github_config.setdefault("pr_title", "Add Intel Xeon (CPU) deployment support")
+                effective_github_config.setdefault(
+                    "pr_description",
+                    "Auto-generated: adds Intel CPU (Xeon) deployment sections alongside CUDA/AMD.",
+                )
+                effective_github_config.setdefault("commit_message", "docs: add Intel Xeon CPU deployment support")
+                effective_github_config["publish_items"] = publish_items
+                print(
+                    f"[_prepare_memory] url_source: auto-derived publish_items from source URLs "
+                    f"→ {[p['path'] for p in publish_items]} in {src_owner}/{src_repo}"
+                )
+            cfg.github_config = effective_github_config
+
+        self.global_memory.memory_store("github_config", effective_github_config)
         self.global_memory.memory_store("ref_md", ref_md)
         self.global_memory.memory_store("ref_index_js", ref_index_js)
         self.global_memory.memory_store("source_md_files", source_md_files)
@@ -613,24 +801,59 @@ class ReadmeWorkflowCrew(Flow[WorkflowState]):
     def _is_enabled(self, stage_name: str) -> bool:
         return stage_name in self.enabled_stages
 
+    def _run_readme_generation_steps(self) -> Dict[str, Any]:
+        """Execute readme_generation as 6 explicit sequential tool steps with per-step output."""
+        gt = GenerateReadmeTool
+        gt.global_memory = self.global_memory
+        gt._pipeline.clear()  # reset transient state for this run
+        step_results: Dict[str, Any] = {}
+
+        def _step(n: int, name: str, tool_fn) -> Dict[str, Any]:
+            print(f"\n  ┌─ Step {n}/6 [{name}]")
+            try:
+                result = tool_fn()
+                print(f"  └─ {json.dumps(result, ensure_ascii=False, default=str)}")
+                return result
+            except Exception as e:
+                err = {"error": str(e)}
+                print(f"  └─ ERROR: {e}")
+                return err
+
+        step_results["1_ensure_source_js"] = _step(
+            1, "ensure_source_js_url", gt.step_ensure_source_js_url.func
+        )
+        step_results["2_resolve_mode"] = _step(
+            2, "resolve_generation_mode", gt.step_resolve_generation_mode.func
+        )
+        step_results["3_classify_models"] = _step(
+            3, "classify_models", gt.step_classify_models.func
+        )
+        step_results["4_llm_generate"] = _step(
+            4, "run_llm_generation", gt.step_run_llm_generation.func
+        )
+        step_results["5_postprocess"] = _step(
+            5, "postprocess_artifacts", gt.step_postprocess_artifacts.func
+        )
+        step_results["6_store"] = _step(
+            6, "store_final_artifacts", gt.step_store_final_artifacts.func
+        )
+
+        all_ok = all("error" not in v for v in step_results.values())
+        return {"ok": all_ok, "step_results": step_results}
+
     def _run_stage(self, stage_name: str) -> Dict[str, Any]:
         print(f"\n=== Running stage: {stage_name} ===")
         if stage_name == "readme_generation":
             # Bypass agent-level LLM for this stage to avoid hard failure/noise when
-            # the Crew LLM endpoint is unavailable; generation tool already handles
-            # legacy/url_source routing and fallback.
+            # the Crew LLM endpoint is unavailable; run each pipeline step explicitly
+            # so intermediate results are visible.
             GenerateReadmeTool.global_memory = self.global_memory
-            tool_result: Dict[str, Any]
-            try:
-                tool_result = GenerateReadmeTool.memory_generate_and_store_family_artifacts.func()
-                print(f"[readme_generation][tool] {tool_result}")
-            except Exception as e:
-                tool_result = {"ok": False, "error": str(e)}
-                print(f"[readme_generation][tool][error] {e}")
+            tool_result = self._run_readme_generation_steps()
             final_output = self._build_readme_generation_output(
                 json.dumps(tool_result, ensure_ascii=False)
             )
             self._print_readme_generation_terminal_output()
+            self._save_readme_generation_artifacts()
             print(f"=== Finished stage: {stage_name} ===")
             return {"stage": stage_name, "final_output": final_output, "skipped": False}
         if stage_name == "remote_execution":
@@ -656,7 +879,12 @@ class ReadmeWorkflowCrew(Flow[WorkflowState]):
                 crew_instance = crew_cls()
             else:
                 raise
-        output = crew_instance.crew().kickoff()
+        # Use crew_instance.kickoff() if available so stage-level bypasses (e.g. url_source
+        # model_search bypass) are respected; fall back to crew().kickoff() otherwise.
+        if hasattr(crew_instance, "kickoff") and callable(crew_instance.kickoff):
+            output = crew_instance.kickoff()
+        else:
+            output = crew_instance.crew().kickoff()
         if stage_name == "readme_generation":
             # Safety net: ensure artifacts in memory are refreshed for current run.
             # If the agent did not actually write artifacts (or left stale values),
@@ -766,6 +994,20 @@ class ReadmeWorkflowCrew(Flow[WorkflowState]):
                 ensure_ascii=False,
             )
         )
+
+    def _save_readme_generation_artifacts(self) -> None:
+        """Write family_md → output.mdx and family_index_js → index.jsx next to this file."""
+        family_md = str(self.global_memory.memory_retrieve("family_md") or "").strip()
+        family_index_js = str(self.global_memory.memory_retrieve("family_index_js") or "").strip()
+        output_dir = Path(__file__).resolve().parent
+        if family_md:
+            out_md = output_dir / "output.mdx"
+            out_md.write_text(family_md, encoding="utf-8")
+            print(f"[readme_generation][saved] {out_md}")
+        if family_index_js:
+            out_js = output_dir / "index.jsx"
+            out_js.write_text(family_index_js, encoding="utf-8")
+            print(f"[readme_generation][saved] {out_js}")
 
     @staticmethod
     def _normalize_stream_text(text: str) -> str:

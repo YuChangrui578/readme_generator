@@ -5,13 +5,16 @@ model_search_task:
     If model_list is empty, stop and report error instead of re-inferring in model_search.
     Before searching, deduplicate model_list by normalized query key only to avoid exact duplicates,
     but keep distinct variants (e.g., Instruct / FP8 / AWQ / Thinking) as separate search intents.
-    Then use huggingface_model_batch_search tool to perform retrieval on Hugging Face with mode-specific behavior:
-    - url_source mode: expand each base model into practical variants when available, including Base / Instruct / Thinking / FP8 / AWQ / Quantized forms.
+    Then use huggingface_model_batch_search tool to perform retrieval with mode-specific behavior:
+    - url_source/web_sources mode: the model_list provided by the caller is already the complete,
+      exact set of model IDs to use. Pass it directly to huggingface_model_batch_search without
+      any variant expansion or HuggingFace search. The tool will return the same list as model_id_list
+      and generate the corresponding HuggingFace URLs.
     - legacy mode: keep strict one-to-one mapping between input model_list and returned model_id_list/model_url_list.
     Use the returned model_list/model_id_list/model_url_list while preserving intended alignment.
     Finally, use memory_store_model_search_results to store model_list, model_id_list, and model_url_list into GLOBAL_MEMORY.
   expected_output: >
     Mode-aware search results persisted in GLOBAL_MEMORY:
-    - url_source: expanded variant set
+    - url_source/web_sources: model_id_list = exact provided model_list, no HF expansion
     - legacy: one-to-one aligned mapping
   agent: model_search_agent

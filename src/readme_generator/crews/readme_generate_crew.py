@@ -34,6 +34,14 @@ class ReadmeGeneratorCrew:
         return Agent(
             config=self.agents_config["readme_generator_agent"],
             tools=[
+                GenerateReadmeTool.memory_retrieve_generation_context,
+                GenerateReadmeTool.step_ensure_source_js_url,
+                GenerateReadmeTool.step_resolve_generation_mode,
+                GenerateReadmeTool.step_classify_models,
+                GenerateReadmeTool.step_run_llm_generation,
+                GenerateReadmeTool.step_postprocess_artifacts,
+                GenerateReadmeTool.step_store_final_artifacts,
+                # Monolithic fallback kept for backward compat
                 GenerateReadmeTool.memory_generate_and_store_family_artifacts,
             ],
             llm=self.llm,

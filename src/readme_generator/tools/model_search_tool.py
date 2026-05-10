@@ -352,11 +352,30 @@ class ModelSearchTool:
     def huggingface_model_batch_search(model_name_list:List[str])->List[str]:
         """Perform batch search for models on Hugging Face.
         Input: list of model names
-        Returns: dictionary containing model_id_list and model_url_list, with one-to-one index correspondence."""
+        Returns: dictionary containing model_id_list and model_url_list, with one-to-one index correspondence.
+        In url_source/web_sources mode the provided model_list is used directly as model_id_list
+        without any HuggingFace search or variant expansion."""
         mode = str(ModelSearchTool._memory().memory_retrieve("generation_mode") or "").strip().lower()
         if is_url_source_mode(mode):
-            # url_source mode: expand practical variants for cpu/backend coverage.
-            result = ModelSearchTool.hf_client.batch_search(model_name_list or [])
+            # url_source mode: the caller already knows the exact model IDs — use them as-is.
+            names = normalize_list(model_name_list or [], fallback_single_str=True, stringify_items=True)
+            deduped: List[str] = []
+            seen: set = set()
+            for n in names:
+                s = str(n or "").strip()
+                if not s:
+                    continue
+                k = HuggingFaceModelClient._query_key(s)
+                if k in seen:
+                    continue
+                seen.add(k)
+                deduped.append(s)
+            urls = [f"https://huggingface.co/{m}" for m in deduped]
+            result = {
+                "model_list": deduped,
+                "model_id_list": deduped,
+                "model_url_list": urls,
+            }
         else:
             # legacy mode: keep strict 1:1 mapping with input models.
             result = ModelSearchTool.hf_client.batch_search_aligned(model_name_list or [])
